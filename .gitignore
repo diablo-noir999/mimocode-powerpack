@@ -1,0 +1,8 @@
+.specs/
+dev/
+dist/
+node_modules/
+*.db
+.mimocode/
+.powerpack/
+tmp/

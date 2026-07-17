@@ -1,0 +1,347 @@
+# Powerpack Agent Instructions
+
+You are running with the Powerpack plugin. Powerpack tools are not optional — they exist because generic tools are slower, less safe, or miss context.
+
+---
+
+## Boot Sequence — Every Session, Before Anything Else
+
+```
+1. memory_search("<project-name> <task-keywords>")
+   → if results: read them before touching any file
+   → if empty: proceed, but write to memory at your first decision
+
+2. task create "<one-line summary of what you're about to do>"
+   → note the ID (T1, T2, ...) — you'll need it
+
+3. context_breakdown()
+   → only if context already feels large; check before adding more
+```
+
+That's it. Three calls, then work.
+
+---
+
+## How to Use Each Tool
+
+### hashline_edit — the ONLY way to edit files
+
+**Wrong:** calling `edit` or `bash sed` directly.
+
+**Right:**
+```
+1. read("src/auth.ts")
+   → output has LINE#HASH tags: "42#A3F2 const user = getUser()"
+
+2. hashline_edit("src/auth.ts", [
+     { line: 42, hash: "A3F2", old_content: "const user = getUser()", new_content: "const user = getUser(); if (!user) return null;" }
+   ])
+```
+
+The hash proves you read the current version. Without it, you're editing stale content. `hashline_read-enhancer` adds tags automatically on every read — use them.
+
+---
+
+### memory_search — before every task, before every design decision
+
+```
+memory_search("auth token refresh")
+→ returns: "BUG_FIX 2024-01-10: refresh tokens expire silently, must check exp field not iat"
+→ action: check exp field before writing any token logic
+```
+
+If it returns nothing, proceed — but write your findings when you're done.
+
+**What to search:** project name, the module you're touching, the bug symptom, the feature name. Cast wide first, narrow if too many results.
+
+---
+
+### memory_write — after every decision, not at end of session
+
+```
+memory_write({
+  category: "BUG_FIX",
+  content: "Fixed null dereference in auth.ts:42 — was checking user.id before null guard. Always check user != null first."
+})
+```
+
+Categories: `PROJECT_RULES` · `ARCHITECTURE` · `CONSTRAINTS` · `CONFIG_VALUES` · `NAMING` · `LESSONS_LEARNED` · `BUG_FIXES` · `USER_PREFERENCES`
+
+Write immediately after the decision. If you wait until end of session, you'll forget or get compacted.
+
+---
+
+### task tool — one entry per non-trivial unit of work
+
+```
+task create "Fix null dereference in auth token refresh"   → T1
+task start T1
+  ... do the work ...
+task done T1
+```
+
+Subtasks: `T1.1`, `T1.2`. Mark done the moment work completes — never batch.
+
+---
+
+### actor_guide + spawn — the only safe way to spawn a subagent
+
+**Wrong:** guessing the spawn JSON format.
+
+**Right:**
+```
+1. actor_guide()
+   → returns the complete JSON schema for all actor operations
+
+2. actor_guide("spawn")
+   → returns only the spawn-specific format
+
+3. spawn(@debugger, {
+     task: "find the root cause of the 401 errors in middleware/auth.ts",
+     thoroughness: "medium"
+   })
+   → returns immediately; keep working while it runs
+
+4. wait(spawn_id) only when you need the result before the next step
+```
+
+Never use `run` — it blocks the entire session.
+
+---
+
+### @explore — for broad exploration, not grep loops
+
+```
+spawn(@explore, {
+  task: "find all places that call refreshToken() and what they do with the result",
+  thoroughness: "very thorough"
+})
+→ read result before proceeding; don't also grep yourself — that duplicates work
+```
+
+Use when a search would take more than 3 queries. Pass one of: `"quick"`, `"medium"`, `"very thorough"`.
+
+---
+
+### ralph_loop — for iterative fix cycles
+
+```
+ralph_loop({
+  prompt: "Run the test suite and fix any failures in auth.test.ts one at a time",
+  completion_signal: "All tests pass"
+})
+```
+
+Never manually retry the same failing prompt. If you're looping more than twice on the same thing, that's ralph_loop's job.
+
+---
+
+### review flow — for code review
+
+```
+review_start()                           → returns session ID
+review_annotate(session, file, line, comment)   → add feedback on a line
+review_approve(session, "approve")       → or review_approve(session, "deny", "reason")
+```
+
+P0 = must fix before merge. P1 = should fix. P2 = suggestion. P3 = nit.
+
+---
+
+## Workflow Table
+
+| Stage | When | Tool/Skill |
+|-------|------|------------|
+| Explore | New codebase, unfamiliar module, >3 queries | `skill("recon")` or spawn `@explore` |
+| Plan | Multi-file change, ambiguity, multiple valid approaches | `skill("plan")` → plan mode → user approves → exit |
+| Build | Plan approved or task is clear | `skill("build")` — one task at a time |
+| Verify | Before any "done" claim | `skill("verify")` + `skill("validation-pipeline")` |
+| Checkpoint | Every milestone, before context gets large | `skill("checkpoint")` |
+
+---
+
+## Agent Dispatch
+
+| Task | Agent |
+|------|-------|
+| Security review, vulnerability detection | `@security-engineer` |
+| Root cause analysis, bug diagnosis | `@debugger` |
+| Test authoring (positive + negative) | `@test-engineer` |
+| Code review with P0-P3 severity | `@code-reviewer` |
+| Safe incremental refactoring | `@refactoring-specialist` |
+| Profiling, bottleneck identification | `@performance-engineer` |
+| CI/CD, infra, deployment | `@devops-engineer` |
+| DB schema, queries, migrations | `@database-reviewer` |
+| REST/GraphQL API design | `@api-designer` |
+| Compliance (GDPR, HIPAA, SOC2) | `@compliance-auditor` |
+| Read-only exploration >3 queries | `@explore` |
+| Multi-step fallback | `@general` |
+
+**Spawn vs Workflow:** one focused subagent → `actor_guide` + `spawn`. Multiple agents with phases/parallelism → `skill("plan")` first, then Workflow tool. Only use Workflow when the user opts in or the task is too large for one subagent.
+
+---
+
+## Skills
+
+Load with `skill("name")`. Match skill to stage.
+
+| Skill | Load When |
+|-------|-----------|
+| `recon` | Exploring unknown codebase, API, or dependency |
+| `plan` | Architecture, feature breakdown, ambiguity |
+| `build` | Implementing features, fixing bugs |
+| `verify` | Code review, security audit, test generation |
+| `checkpoint` | Milestone — save progress |
+| `compress` | Context large — run before reading more |
+| `context` | Session hygiene — compact history, sync state |
+| `research` | Multi-source topic research |
+| `spec-writer` | Write spec before implementation |
+| `readme` | Write documentation |
+| `stop-slop` | Remove AI writing patterns from output |
+| `ponytail` | Minimize code — remove everything not earned |
+| `grilling` | Challenge your own or the user's design |
+| `validation-pipeline` | Pre-commit: review → test → lint → typecheck |
+| `coding-guidelines` | YAGNI ladder, anti-overcompilation |
+| `improve` | Audit codebase, write plans for other agents |
+| `adversarial-review` | Cross-model review: security, perf, correctness |
+
+---
+
+## Hooks (Automatic — No Action Needed)
+
+- `comment-checker` — anti-slop on edits
+- `dedup-prune` — tool call deduplication
+- `error-prune` — error input pruning
+- `hashline-read-enhancer` — adds LINE#HASH tags on every read (required for hashline_edit)
+- `transform-pipeline` — context pruning + cache layout
+- `safety-net` — blocks dangerous git/rm/find operations
+- Proximity-aware rules injection near edited files
+
+---
+
+## Testing
+
+The plugin ships 10 test suites under `test/` with 529+ tests. Run `bun run test/run-all.ts` for the full suite, or individual files for targeted testing.
+
+**When to write tests:**
+- After fixing a bug → add a regression test in the relevant suite
+- After adding a new module → create `test/test-<module>.ts` and add to `run-all.ts`
+- When touching memory/hooks/compression → verify existing tests still pass
+
+**Test structure:** Each suite uses a flat assert/assertEq pattern (no test framework). Sections group related tests. Exit code 0 = pass, 1 = fail.
+
+**Key test files:**
+- `test-hooks.ts` — all hooks + utility modules (dedup, error-prune, intent-gate, comment-checker, hashline-read-enhancer, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, hashline-utils, memory-utils, message-utils, team/utils)
+- `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF), decay math, batch ops
+- `test-compression.ts` — content-router, json-crusher, code-compressor, compress index
+- `test-cache-layout.ts` — m0/m1/m2 zone classification, bust severity, stability score
+- `test-smart-drops.ts` — context pruning strategies, applyDrops
+- `test-token-utils.ts` — token estimation for text and messages
+- `test-decay-render.ts` — compartment rendering, tier logic, M0 block extraction
+- `test-skills.ts` — YAML parser, skill installer, metadata
+- `test-team.ts` — mailbox (send/receive/ack, path traversal), tasklist (create/claim, contention)
+- `test-compat-quota.ts` — QuotaService, ReviewServer, Kimaki config, RalphLoop, HashlineEdit
+
+---
+
+## Worked Examples
+
+### "Fix the bug in auth.ts"
+
+```
+memory_search("auth bug")
+→ "BUG_FIX: refresh tokens use iat field, should use exp — checked 2024-01-10"
+
+task create "Fix token expiry bug in auth.ts"   → T1
+task start T1
+
+read("src/auth.ts")
+→ line 87#C4A1: if (token.iat < Date.now()) throw new AuthError()
+
+hashline_edit("src/auth.ts", [
+  { line: 87, hash: "C4A1", old_content: "if (token.iat < Date.now()) throw new AuthError()", new_content: "if (token.exp < Date.now() / 1000) throw new AuthError()" }
+])
+
+skill("validation-pipeline")
+→ all tests pass
+
+memory_write({ category: "BUG_FIX", content: "auth.ts:87 — was checking iat (issued-at), must check exp (expiry). Token timestamps are in seconds, Date.now() in ms." })
+task done T1
+```
+
+---
+
+### "Add rate limiting to the API"
+
+```
+memory_search("rate limit API")
+→ nothing
+
+task create "Add rate limiting to API routes"   → T1
+
+skill("recon")   → understand current middleware stack
+skill("plan")    → design rate-limit approach, present to user
+→ user approves
+
+task create "Implement rate-limit middleware"   → T1.1
+task start T1.1
+skill("build")
+→ write middleware/rateLimit.ts
+→ hashline_edit to wire it into routes/index.ts
+
+skill("validation-pipeline")
+task done T1.1
+
+spawn(@test-engineer, { task: "write tests for rateLimit middleware — positive (allows under limit) and negative (blocks over limit)" })
+wait(spawn_id)
+
+task done T1
+memory_write({ category: "ARCHITECTURE", content: "Rate limiting via middleware/rateLimit.ts, applied at routes/index.ts before auth. Uses sliding window, 100 req/min per IP." })
+skill("checkpoint")
+```
+
+---
+
+### "Review this PR"
+
+```
+session = review_start()
+
+spawn(@code-reviewer, {
+  task: "Review the diff for security issues, correctness, and performance. Tag findings P0-P3."
+})
+wait(spawn_id)
+
+→ findings: "P1: SQL query in user.ts:34 concatenates user input — use parameterized query"
+
+review_annotate(session, "user.ts", 34, "P1: SQL injection risk — use db.query('SELECT * FROM users WHERE id = ?', [id])")
+review_approve(session, "approve")   // or review_approve(session, "deny", "reason") if P0 found
+```
+
+---
+
+### "The tests keep failing, fix them"
+
+```
+memory_search("test failures")
+→ "LESSON: auth tests fail if JWT_SECRET env var not set in test environment"
+
+// if that's not the issue:
+ralph_loop({
+  prompt: "Run the test suite. For each failure, read the relevant file, identify the cause, fix it with hashline_edit, then re-run. Stop when all tests pass.",
+  completion_signal: "All tests pass"
+})
+```
+
+---
+
+### "Explore how the payment system works"
+
+```
+spawn(@explore, {
+  task: "Map the full payment flow: from checkout route to payment provider and back. Find all files involved, key functions, and any error handling.",
+  thoroughness: "very thorough"
+})
+wait(spawn_id)
+→ read result before asking any more questions or reading any more files
+```

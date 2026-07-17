@@ -1,0 +1,1185 @@
+import { existsSync } from "fs";
+import { readFile } from "fs/promises";
+import { basename } from "path";
+
+import { writeJsonAtomic } from "./atomic-json.js";
+import {
+  dedupeNonEmptyStrings,
+  extractPluginSpecsFromParsedConfig,
+  getPluginSpecFromEntry,
+  isQuotaPluginSpec,
+  resolveEditableConfigPath,
+  findGitWorktreeRoot,
+  type ConfigFileFormat,
+} from "./config-file-utils.js";
+import { parseJsonOrJsonc } from "./jsonc.js";
+import { getOpencodeRuntimeDirCandidates } from "./opencode-runtime-paths.js";
+import {
+  QUOTA_PROVIDER_SHAPES,
+  getQuotaProviderDisplayLabel,
+  normalizeQuotaProviderId,
+} from "./provider-metadata.js";
+import {
+  getQuotaFormatStyleLabel,
+  isQuotaFormatStyle,
+  resolveQuotaFormatStyle,
+  type CanonicalQuotaFormatStyle,
+} from "./quota-format-style.js";
+import { getQuotaToastConfigPath, QUOTA_TOAST_CONFIG_RELATIVE_PATH } from "./config.js";
+import type { QuotaToastConfig } from "./types.js";
+
+const QUOTA_PLUGIN_SPEC = "@slkiser/opencode-quota";
+const OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json";
+const TUI_SCHEMA_URL = "https://opencode.ai/tui.json";
+const GITHUB_REPO_URL = "https://github.com/slkiser/opencode-quota";
+const GITHUB_STAR_NOTE = `if this helps, stars are appreciated: ${GITHUB_REPO_URL}`;
+
+export type InitInstallerScope = "project" | "global";
+export type InitQuotaUiChoice = "toast" | "sidebar" | "compact_status" | "none";
+export type InitQuotaUi = readonly InitQuotaUiChoice[];
+export type InitProviderMode = "auto" | "manual";
+type InitTuiCompactStatusMode = "off" | "home_bottom" | "home_bottom_session_prompt";
+
+type LegacyInitQuotaUi = "toast" | "sidebar" | "toast_sidebar" | "none";
+type LegacyInitInstallerSelectionsInput = Omit<InitInstallerSelections, "quotaUi"> & {
+  quotaUi?: InitQuotaUi | LegacyInitQuotaUi;
+  tuiCompactStatus?: InitTuiCompactStatusMode;
+};
+
+export interface InitInstallerSelections {
+  scope: InitInstallerScope;
+  quotaUi: InitQuotaUi;
+  providerMode: InitProviderMode;
+  manualProviders: string[];
+  formatStyle: CanonicalQuotaFormatStyle;
+  percentDisplayMode: QuotaToastConfig["percentDisplayMode"];
+  showSessionTokens: boolean;
+  maintainerAnnouncements?: boolean;
+}
+
+export interface InitInstallerQuickSetupNote {
+  providerId: string;
+  label: string;
+  anchor: string;
+}
+
+export interface PlannedConfigEdit {
+  kind: "opencode" | "tui" | "quota";
+  path: string;
+  existed: boolean;
+  format: ConfigFileFormat;
+  changed: boolean;
+  addedPlugins: string[];
+  addedKeys: string[];
+  updatedKeys: string[];
+  skippedValues: string[];
+  warnings: string[];
+  nextData?: Record<string, unknown>;
+  plannedData?: Record<string, unknown>;
+}
+
+export interface InitInstallerPlan {
+  selections: InitInstallerSelections;
+  baseDir: string;
+  edits: PlannedConfigEdit[];
+  warnings: string[];
+  quickSetupNotes: InitInstallerQuickSetupNote[];
+  summaryLines: string[];
+}
+
+export interface ApplyInitInstallerPlanResult {
+  writtenPaths: string[];
+  unchangedPaths: string[];
+}
+
+export class InitInstallerError extends Error {
+  constructor(
+    message: string,
+    readonly details?: {
+      path?: string;
+      writtenPaths?: string[];
+    },
+  ) {
+    super(message);
+    this.name = "InitInstallerError";
+  }
+}
+
+type JsonObject = Record<string, unknown>;
+
+type PromptOption = {
+  label: string;
+  value: string;
+  hint?: string;
+};
+
+type NormalizedQuotaUiIntent = {
+  choices: InitQuotaUiChoice[];
+  enableToast: boolean;
+  installTuiPlugin: boolean;
+  enableSidebarPanel: boolean;
+  enableCompactStatus: boolean;
+};
+
+type PromptAdapter = {
+  intro: (message: string) => void;
+  outro: (message: string) => void;
+  select: (options: { message: string; options: PromptOption[] }) => Promise<unknown>;
+  multiselect: (options: {
+    message: string;
+    required?: boolean;
+    options: PromptOption[];
+  }) => Promise<unknown>;
+  confirm: (options: { message: string; initialValue?: boolean }) => Promise<unknown>;
+  isCancel: (value: unknown) => boolean;
+  log: {
+    info: (message: string) => void;
+    success: (message: string) => void;
+    error: (message: string) => void;
+  };
+};
+
+function isPlainObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOwnKey<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+const QUOTA_UI_CHOICE_ORDER: InitQuotaUiChoice[] = [
+  "toast",
+  "sidebar",
+  "compact_status",
+  "none",
+];
+
+function normalizeQuotaUiIntent(selections: InitInstallerSelections): NormalizedQuotaUiIntent {
+  const legacySelections = selections as LegacyInitInstallerSelectionsInput;
+  const quotaUi = legacySelections.quotaUi ?? [];
+  const rawChoices = Array.isArray(quotaUi)
+    ? quotaUi
+    : quotaUi === "toast_sidebar"
+      ? ["toast", "sidebar"]
+      : [quotaUi];
+  const seen = new Set<InitQuotaUiChoice>();
+
+  for (const rawChoice of rawChoices) {
+    if (typeof rawChoice !== "string" || !QUOTA_UI_CHOICE_ORDER.includes(rawChoice as InitQuotaUiChoice)) {
+      throw new InitInstallerError(`Unknown Quota UI option: ${String(rawChoice)}`);
+    }
+    seen.add(rawChoice as InitQuotaUiChoice);
+  }
+
+  const legacyCompactMode = legacySelections.tuiCompactStatus;
+  if (legacyCompactMode !== undefined && legacyCompactMode !== "off") {
+    if (legacyCompactMode !== "home_bottom" && legacyCompactMode !== "home_bottom_session_prompt") {
+      throw new InitInstallerError(`Unknown Compact TUI status: ${String(legacyCompactMode)}`);
+    }
+    seen.delete("none");
+    seen.add("compact_status");
+  }
+
+  let choices = QUOTA_UI_CHOICE_ORDER.filter((choice) => seen.has(choice));
+  if (choices.length === 0) {
+    choices = ["none"];
+  } else if (choices.length > 1 && choices.includes("none")) {
+    choices = choices.filter((choice) => choice !== "none");
+  }
+
+  const enableSidebarPanel = choices.includes("sidebar");
+  const enableCompactStatus = choices.includes("compact_status");
+
+  return {
+    choices,
+    enableToast: choices.includes("toast"),
+    installTuiPlugin: enableSidebarPanel || enableCompactStatus,
+    enableSidebarPanel,
+    enableCompactStatus,
+  };
+}
+
+function getUiLabel(choices: readonly InitQuotaUiChoice[]): string {
+  const labels = choices.map((choice) => {
+    if (choice === "toast") return "Toast";
+    if (choice === "sidebar") return "Sidebar";
+    if (choice === "compact_status") return "Compact status";
+    return "No automatic UI surfaces";
+  });
+  return labels.join(" + ");
+}
+
+function getProviderModeLabel(mode: InitProviderMode): string {
+  return mode === "manual" ? "Manual" : "Auto-detect";
+}
+
+function getPercentDisplayModeLabel(mode: QuotaToastConfig["percentDisplayMode"]): string {
+  return mode === "used" ? "Used" : "Remaining";
+}
+
+function getTuiCompactStatusLabel(mode: InitTuiCompactStatusMode): string {
+  if (mode === "home_bottom") return "Home bottom only";
+  if (mode === "home_bottom_session_prompt") return "Home bottom + session prompt";
+  return "Off";
+}
+
+function resolveRequestedProviders(selections: InitInstallerSelections): string[] | "auto" {
+  if (selections.providerMode === "auto") {
+    return "auto";
+  }
+
+  const normalized = dedupeNonEmptyStrings(
+    selections.manualProviders
+      .map((providerId) => normalizeQuotaProviderId(providerId))
+      .filter((providerId) => QUOTA_PROVIDER_SHAPES.some((shape) => shape.id === providerId)),
+  );
+
+  if (normalized.length === 0) {
+    throw new InitInstallerError("Manual provider mode requires at least one supported provider.");
+  }
+
+  return normalized;
+}
+
+function pickFormatStyleToWrite(params: {
+  quotaToast: JsonObject;
+  selectedFormatStyle: CanonicalQuotaFormatStyle;
+}): CanonicalQuotaFormatStyle {
+  if (isQuotaFormatStyle(params.quotaToast.toastStyle)) {
+    return resolveQuotaFormatStyle(params.quotaToast.toastStyle);
+  }
+
+  return params.selectedFormatStyle;
+}
+
+function pushSkippedIfChanged(
+  edit: PlannedConfigEdit,
+  pathLabel: string,
+  existingValue: unknown,
+  desiredValue: unknown,
+): void {
+  if (!jsonEqual(existingValue, desiredValue)) {
+    edit.skippedValues.push(`${pathLabel} preserved existing value`);
+  }
+}
+
+function ensureSchema(root: JsonObject, schemaUrl: string, edit: PlannedConfigEdit): void {
+  if (!hasOwnKey(root, "$schema")) {
+    root.$schema = schemaUrl;
+    edit.changed = true;
+    edit.addedKeys.push("$schema");
+    return;
+  }
+
+  pushSkippedIfChanged(edit, "$schema", root.$schema, schemaUrl);
+}
+
+function appendQuotaPluginIfMissing(params: {
+  container: unknown[];
+  pathLabel: string;
+  kind: "opencode" | "tui";
+  edit: PlannedConfigEdit;
+}): void {
+  const alreadyConfigured = params.container.some((entry) => {
+    const spec = getPluginSpecFromEntry(entry);
+    return typeof spec === "string" && isQuotaPluginSpec(spec, params.kind);
+  });
+
+  if (alreadyConfigured) {
+    params.edit.skippedValues.push(`${params.pathLabel} already includes ${QUOTA_PLUGIN_SPEC}`);
+    return;
+  }
+
+  params.container.push(QUOTA_PLUGIN_SPEC);
+  params.edit.changed = true;
+  params.edit.addedPlugins.push(`${params.pathLabel}: ${QUOTA_PLUGIN_SPEC}`);
+}
+
+function ensureTopLevelPluginArray(root: JsonObject, edit: PlannedConfigEdit): unknown[] {
+  if (!hasOwnKey(root, "plugin")) {
+    const next: unknown[] = [];
+    root.plugin = next;
+    edit.changed = true;
+    return next;
+  }
+
+  if (!Array.isArray(root.plugin)) {
+    throw new InitInstallerError(
+      `Cannot update ${edit.kind} config because plugin is not an array.`,
+      { path: edit.path },
+    );
+  }
+
+  return root.plugin;
+}
+
+function ensureTuiPluginArray(
+  root: JsonObject,
+  edit: PlannedConfigEdit,
+): {
+  container: unknown[];
+  pathLabel: string;
+} {
+  if (isPlainObject(root.tui) && hasOwnKey(root.tui, "plugin")) {
+    const tuiRoot = root.tui as JsonObject;
+    if (!Array.isArray(tuiRoot.plugin)) {
+      throw new InitInstallerError(
+        `Cannot update ${edit.kind} config because tui.plugin is not an array.`,
+        { path: edit.path },
+      );
+    }
+
+    return {
+      container: tuiRoot.plugin,
+      pathLabel: "tui.plugin",
+    };
+  }
+
+  if (hasOwnKey(root, "plugin")) {
+    if (!Array.isArray(root.plugin)) {
+      throw new InitInstallerError(
+        `Cannot update ${edit.kind} config because plugin is not an array.`,
+        { path: edit.path },
+      );
+    }
+
+    return {
+      container: root.plugin,
+      pathLabel: "plugin",
+    };
+  }
+
+  const next: unknown[] = [];
+  root.plugin = next;
+  edit.changed = true;
+  return {
+    container: next,
+    pathLabel: "plugin",
+  };
+}
+
+function addSettingIfMissing(
+  target: JsonObject,
+  key: string,
+  value: unknown,
+  pathLabel: string,
+  edit: PlannedConfigEdit,
+): void {
+  if (!hasOwnKey(target, key)) {
+    target[key] = value;
+    edit.changed = true;
+    edit.addedKeys.push(pathLabel);
+    return;
+  }
+
+  pushSkippedIfChanged(edit, pathLabel, target[key], value);
+}
+
+function setInstallerOwnedSetting(
+  target: JsonObject,
+  key: string,
+  value: unknown,
+  pathLabel: string,
+  edit: PlannedConfigEdit,
+): void {
+  if (!hasOwnKey(target, key)) {
+    target[key] = value;
+    edit.changed = true;
+    edit.addedKeys.push(pathLabel);
+    return;
+  }
+
+  if (!jsonEqual(target[key], value)) {
+    target[key] = value;
+    edit.changed = true;
+    edit.updatedKeys.push(pathLabel);
+  }
+}
+
+function planTuiSidebarPanelConfig(params: {
+  quotaToast: JsonObject;
+  quotaUiIntent: NormalizedQuotaUiIntent;
+  edit: PlannedConfigEdit;
+}): void {
+  const pathLabel = "quotaToast.tuiSidebarPanel";
+  let tuiSidebarPanel: JsonObject;
+  if (!hasOwnKey(params.quotaToast, "tuiSidebarPanel")) {
+    tuiSidebarPanel = {};
+    params.quotaToast.tuiSidebarPanel = tuiSidebarPanel;
+  } else if (isPlainObject(params.quotaToast.tuiSidebarPanel)) {
+    tuiSidebarPanel = params.quotaToast.tuiSidebarPanel;
+  } else {
+    params.edit.warnings.push(`${pathLabel} is not an object; preserved existing value.`);
+    return;
+  }
+
+  setInstallerOwnedSetting(
+    tuiSidebarPanel,
+    "enabled",
+    params.quotaUiIntent.enableSidebarPanel,
+    `${pathLabel}.enabled`,
+    params.edit,
+  );
+}
+
+function planMaintainerAnnouncementsConfig(params: {
+  quotaToast: JsonObject;
+  selections: InitInstallerSelections;
+  edit: PlannedConfigEdit;
+}): void {
+  if (params.selections.maintainerAnnouncements === undefined) {
+    return;
+  }
+
+  const enabled = params.selections.maintainerAnnouncements;
+
+  const pathLabel = "quotaToast.maintainerAnnouncements";
+  let maintainerAnnouncements: JsonObject;
+  if (!hasOwnKey(params.quotaToast, "maintainerAnnouncements")) {
+    maintainerAnnouncements = {};
+    params.quotaToast.maintainerAnnouncements = maintainerAnnouncements;
+  } else if (isPlainObject(params.quotaToast.maintainerAnnouncements)) {
+    maintainerAnnouncements = params.quotaToast.maintainerAnnouncements;
+  } else {
+    params.edit.warnings.push(`${pathLabel} is not an object; preserved existing value.`);
+    return;
+  }
+
+  setInstallerOwnedSetting(
+    maintainerAnnouncements,
+    "enabled",
+    enabled,
+    `${pathLabel}.enabled`,
+    params.edit,
+  );
+
+  if (enabled) {
+    setInstallerOwnedSetting(
+      maintainerAnnouncements,
+      "home",
+      true,
+      `${pathLabel}.home`,
+      params.edit,
+    );
+  }
+}
+
+function planTuiCompactStatusConfig(params: {
+  quotaToast: JsonObject;
+  quotaUiIntent: NormalizedQuotaUiIntent;
+  edit: PlannedConfigEdit;
+}): void {
+  const hasExistingCompactStatus = hasOwnKey(params.quotaToast, "tuiCompactStatus");
+  if (!params.quotaUiIntent.enableCompactStatus && !hasExistingCompactStatus) {
+    return;
+  }
+
+  const pathLabel = "quotaToast.tuiCompactStatus";
+  let tuiCompactStatus: JsonObject;
+  if (!hasExistingCompactStatus) {
+    tuiCompactStatus = {};
+    params.quotaToast.tuiCompactStatus = tuiCompactStatus;
+  } else if (isPlainObject(params.quotaToast.tuiCompactStatus)) {
+    tuiCompactStatus = params.quotaToast.tuiCompactStatus;
+  } else {
+    params.edit.warnings.push(`${pathLabel} is not an object; preserved existing value.`);
+    return;
+  }
+
+  setInstallerOwnedSetting(
+    tuiCompactStatus,
+    "enabled",
+    params.quotaUiIntent.enableCompactStatus,
+    `${pathLabel}.enabled`,
+    params.edit,
+  );
+
+  if (!params.quotaUiIntent.enableCompactStatus) {
+    return;
+  }
+
+  setInstallerOwnedSetting(tuiCompactStatus, "homeBottom", true, `${pathLabel}.homeBottom`, params.edit);
+  setInstallerOwnedSetting(
+    tuiCompactStatus,
+    "sessionPrompt",
+    true,
+    `${pathLabel}.sessionPrompt`,
+    params.edit,
+  );
+  setInstallerOwnedSetting(
+    tuiCompactStatus,
+    "suppressWhenNativeProviderQuota",
+    true,
+    `${pathLabel}.suppressWhenNativeProviderQuota`,
+    params.edit,
+  );
+}
+
+async function readExistingConfig(params: {
+  path: string;
+  format: ConfigFileFormat;
+}): Promise<JsonObject> {
+  try {
+    const content = await readFile(params.path, "utf-8");
+    const parsed = parseJsonOrJsonc(content, params.format === "jsonc");
+    if (!isPlainObject(parsed)) {
+      throw new InitInstallerError("Existing config root must be a JSON object.", {
+        path: params.path,
+      });
+    }
+
+    return parsed as JsonObject;
+  } catch (error) {
+    if (error instanceof InitInstallerError) {
+      throw error;
+    }
+
+    throw new InitInstallerError(`Failed to parse ${basename(params.path)}.`, {
+      path: params.path,
+    });
+  }
+}
+
+function cloneJsonValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function cloneJsonObject(value: JsonObject): JsonObject {
+  return cloneJsonValue(value);
+}
+
+async function readLegacyQuotaToastSeed(baseDir: string): Promise<JsonObject | null> {
+  const target = resolveEditableConfigPath({ dir: baseDir, kind: "opencode" });
+  if (!target.existed) {
+    return null;
+  }
+
+  const root = await readExistingConfig(target);
+  const experimental = isPlainObject(root.experimental) ? root.experimental : null;
+  const quotaToast = experimental && isPlainObject(experimental.quotaToast)
+    ? experimental.quotaToast
+    : null;
+  return quotaToast ? cloneJsonObject(quotaToast) : null;
+}
+
+function buildQuickSetupNotes(selections: InitInstallerSelections): InitInstallerQuickSetupNote[] {
+  if (selections.providerMode !== "manual") {
+    return [];
+  }
+
+  const requestedProviders = resolveRequestedProviders(selections);
+  if (requestedProviders === "auto") {
+    return [];
+  }
+
+  return requestedProviders
+    .map((providerId) => QUOTA_PROVIDER_SHAPES.find((shape) => shape.id === providerId))
+    .filter((shape): shape is (typeof QUOTA_PROVIDER_SHAPES)[number] =>
+      Boolean(shape?.quickSetupAnchor && shape.autoSetup === "needs_quick_setup"),
+    )
+    .map((shape) => ({
+      providerId: shape.id,
+      label: getQuotaProviderDisplayLabel(shape.id),
+      anchor: shape.quickSetupAnchor!,
+    }));
+}
+
+function syncLegacyQuotaToast(params: {
+  root: JsonObject;
+  quotaToast: JsonObject;
+  edit: PlannedConfigEdit;
+}): void {
+  if (Object.keys(params.quotaToast).length === 0) {
+    return;
+  }
+
+  let experimental: JsonObject;
+  if (!hasOwnKey(params.root, "experimental")) {
+    experimental = {};
+    params.root.experimental = experimental;
+  } else if (isPlainObject(params.root.experimental)) {
+    experimental = params.root.experimental;
+  } else {
+    throw new InitInstallerError(
+      "Cannot sync legacy config because experimental is not an object.",
+      { path: params.edit.path },
+    );
+  }
+
+  let legacyQuotaToast: JsonObject;
+  if (!hasOwnKey(experimental, "quotaToast")) {
+    legacyQuotaToast = {};
+    experimental.quotaToast = legacyQuotaToast;
+  } else if (isPlainObject(experimental.quotaToast)) {
+    legacyQuotaToast = experimental.quotaToast;
+  } else {
+    throw new InitInstallerError(
+      "Cannot sync legacy config because experimental.quotaToast is not an object.",
+      { path: params.edit.path },
+    );
+  }
+
+  let changed = false;
+  for (const [key, value] of Object.entries(params.quotaToast)) {
+    if (!jsonEqual(legacyQuotaToast[key], value)) {
+      legacyQuotaToast[key] = cloneJsonValue(value);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    params.edit.changed = true;
+    params.edit.addedKeys.push(
+      "experimental.quotaToast (synced from opencode-quota/quota-toast.json)",
+    );
+  }
+}
+
+async function planOpencodeEdit(params: {
+  selections: InitInstallerSelections;
+  baseDir: string;
+  legacyQuotaToastToSync?: JsonObject;
+}): Promise<PlannedConfigEdit> {
+  const target = resolveEditableConfigPath({ dir: params.baseDir, kind: "opencode" });
+  const edit: PlannedConfigEdit = {
+    kind: "opencode",
+    path: target.path,
+    existed: target.existed,
+    format: target.format,
+    changed: false,
+    addedPlugins: [],
+    addedKeys: [],
+    updatedKeys: [],
+    skippedValues: [],
+    warnings:
+      target.format === "jsonc"
+        ? ["Existing JSONC comments/trailing commas will be stripped."]
+        : [],
+  };
+
+  const root = target.existed ? await readExistingConfig(target) : {};
+
+  ensureSchema(root, OPENCODE_SCHEMA_URL, edit);
+
+  const plugin = ensureTopLevelPluginArray(root, edit);
+  appendQuotaPluginIfMissing({
+    container: plugin,
+    pathLabel: "plugin",
+    kind: "opencode",
+    edit,
+  });
+
+  if (params.legacyQuotaToastToSync) {
+    syncLegacyQuotaToast({
+      root,
+      quotaToast: params.legacyQuotaToastToSync,
+      edit,
+    });
+  }
+
+  if (edit.changed) {
+    edit.nextData = root;
+  }
+
+  return edit;
+}
+
+async function planQuotaConfigEdit(params: {
+  selections: InitInstallerSelections;
+  quotaUiIntent: NormalizedQuotaUiIntent;
+  baseDir: string;
+}): Promise<PlannedConfigEdit> {
+  const path = getQuotaToastConfigPath(params.baseDir);
+  const existed = existsSync(path);
+  const edit: PlannedConfigEdit = {
+    kind: "quota",
+    path,
+    existed,
+    format: "json",
+    changed: false,
+    addedPlugins: [],
+    addedKeys: [],
+    updatedKeys: [],
+    skippedValues: [],
+    warnings: [],
+  };
+
+  const legacyQuotaToast = existed ? null : await readLegacyQuotaToastSeed(params.baseDir);
+  const quotaToast = existed
+    ? await readExistingConfig({ path, format: "json" })
+    : legacyQuotaToast
+      ? cloneJsonObject(legacyQuotaToast)
+      : {};
+
+  if (!existed) {
+    edit.changed = true;
+    edit.addedKeys.push(
+      legacyQuotaToast
+        ? `${QUOTA_TOAST_CONFIG_RELATIVE_PATH} (seeded from experimental.quotaToast)`
+        : QUOTA_TOAST_CONFIG_RELATIVE_PATH,
+    );
+  }
+
+  setInstallerOwnedSetting(
+    quotaToast,
+    "enableToast",
+    params.quotaUiIntent.enableToast,
+    "quotaToast.enableToast",
+    edit,
+  );
+  addSettingIfMissing(
+    quotaToast,
+    "showSessionTokens",
+    params.selections.showSessionTokens,
+    "quotaToast.showSessionTokens",
+    edit,
+  );
+  addSettingIfMissing(
+    quotaToast,
+    "enabledProviders",
+    resolveRequestedProviders(params.selections),
+    "quotaToast.enabledProviders",
+    edit,
+  );
+  addSettingIfMissing(
+    quotaToast,
+    "formatStyle",
+    pickFormatStyleToWrite({
+      quotaToast,
+      selectedFormatStyle: params.selections.formatStyle,
+    }),
+    "quotaToast.formatStyle",
+    edit,
+  );
+  addSettingIfMissing(
+    quotaToast,
+    "percentDisplayMode",
+    params.selections.percentDisplayMode,
+    "quotaToast.percentDisplayMode",
+    edit,
+  );
+  planTuiSidebarPanelConfig({
+    quotaToast,
+    quotaUiIntent: params.quotaUiIntent,
+    edit,
+  });
+  planTuiCompactStatusConfig({
+    quotaToast,
+    quotaUiIntent: params.quotaUiIntent,
+    edit,
+  });
+  planMaintainerAnnouncementsConfig({
+    quotaToast,
+    selections: params.selections,
+    edit,
+  });
+
+  edit.plannedData = quotaToast;
+  if (edit.changed) {
+    edit.nextData = quotaToast;
+  }
+
+  return edit;
+}
+
+async function planTuiEdit(params: {
+  selections: InitInstallerSelections;
+  baseDir: string;
+}): Promise<PlannedConfigEdit> {
+  const target = resolveEditableConfigPath({ dir: params.baseDir, kind: "tui" });
+  const edit: PlannedConfigEdit = {
+    kind: "tui",
+    path: target.path,
+    existed: target.existed,
+    format: target.format,
+    changed: false,
+    addedPlugins: [],
+    addedKeys: [],
+    updatedKeys: [],
+    skippedValues: [],
+    warnings:
+      target.format === "jsonc"
+        ? ["Existing JSONC comments/trailing commas will be stripped."]
+        : [],
+  };
+
+  const root = target.existed ? await readExistingConfig(target) : {};
+  ensureSchema(root, TUI_SCHEMA_URL, edit);
+
+  const existingPluginSpecs = extractPluginSpecsFromParsedConfig(root);
+  if (existingPluginSpecs.some((spec) => isQuotaPluginSpec(spec, "tui"))) {
+    edit.skippedValues.push(`tui config already includes ${QUOTA_PLUGIN_SPEC}`);
+  } else {
+    const pluginTarget = ensureTuiPluginArray(root, edit);
+    appendQuotaPluginIfMissing({
+      container: pluginTarget.container,
+      pathLabel: pluginTarget.pathLabel,
+      kind: "tui",
+      edit,
+    });
+  }
+
+  if (edit.changed) {
+    edit.nextData = root;
+  }
+
+  return edit;
+}
+
+function buildPlanSummary(plan: InitInstallerPlan): string[] {
+  const quotaUiIntent = normalizeQuotaUiIntent(plan.selections);
+  const lines: string[] = [
+    `Scope: ${plan.selections.scope} (${plan.baseDir})`,
+    `Quota UI: ${getUiLabel(quotaUiIntent.choices)}`,
+    `Provider mode: ${getProviderModeLabel(plan.selections.providerMode)}`,
+    `Quota reset periods: ${getQuotaFormatStyleLabel(plan.selections.formatStyle)}`,
+    `Quota percentage meaning: ${getPercentDisplayModeLabel(plan.selections.percentDisplayMode)}`,
+    `Session token details: ${plan.selections.showSessionTokens ? "Show" : "Hide"}`,
+  ];
+
+  if (plan.selections.maintainerAnnouncements !== undefined) {
+    lines.push(
+      `Maintainer announcements: ${plan.selections.maintainerAnnouncements ? "Enabled" : "Disabled"}`,
+    );
+  }
+
+  if (quotaUiIntent.enableCompactStatus) {
+    lines.push(`Compact status mode: ${getTuiCompactStatusLabel("home_bottom_session_prompt")}`);
+  }
+
+  const requestedProviders = resolveRequestedProviders(plan.selections);
+  if (requestedProviders !== "auto") {
+    lines.push(
+      `Manual providers: ${requestedProviders.map((providerId) => getQuotaProviderDisplayLabel(providerId)).join(", ")}`,
+    );
+  }
+
+  for (const edit of plan.edits) {
+    const mode = !edit.existed ? "create" : edit.changed ? "update" : "unchanged";
+    lines.push(`${mode}: ${edit.path}`);
+
+    for (const plugin of edit.addedPlugins) {
+      lines.push(`  + plugin ${plugin}`);
+    }
+    for (const key of edit.addedKeys) {
+      lines.push(`  + ${key}`);
+    }
+    for (const key of edit.updatedKeys) {
+      lines.push(`  ~ ${key}`);
+    }
+    for (const skipped of edit.skippedValues) {
+      lines.push(`  = ${skipped}`);
+    }
+    for (const warning of edit.warnings) {
+      lines.push(`  ! ${warning}`);
+    }
+  }
+
+  if (plan.quickSetupNotes.length > 0) {
+    lines.push("Quick setup reminders:");
+    for (const note of plan.quickSetupNotes) {
+      lines.push(`  - ${note.label}: README.md#${note.anchor}`);
+    }
+  }
+
+  if (plan.warnings.length > 0) {
+    lines.push("Warnings:");
+    for (const warning of plan.warnings) {
+      lines.push(`  ! ${warning}`);
+    }
+  }
+
+  return lines;
+}
+
+export function getInstallerProviderPromptOptions(): PromptOption[] {
+  return QUOTA_PROVIDER_SHAPES.map((shape) => ({
+    label:
+      shape.autoSetup === "needs_quick_setup"
+        ? `${getQuotaProviderDisplayLabel(shape.id)} (quick setup)`
+        : getQuotaProviderDisplayLabel(shape.id),
+    value: shape.id,
+  }));
+}
+
+export function resolveInitInstallerBaseDir(params: {
+  scope: InitInstallerScope;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+}): string {
+  if (params.scope === "global") {
+    const candidates = getOpencodeRuntimeDirCandidates({
+      env: params.env,
+      homeDir: params.homeDir,
+    });
+    return candidates.configDirs[0]!;
+  }
+
+  const cwd = params.cwd ?? process.cwd();
+  return findGitWorktreeRoot(cwd) ?? cwd;
+}
+
+export async function planInitInstaller(params: {
+  selections: InitInstallerSelections;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  syncLegacyConfig?: boolean;
+}): Promise<InitInstallerPlan> {
+  const quotaUiIntent = normalizeQuotaUiIntent(params.selections);
+  const selections: InitInstallerSelections = {
+    ...params.selections,
+    quotaUi: quotaUiIntent.choices,
+    maintainerAnnouncements: params.selections.maintainerAnnouncements,
+    manualProviders:
+      params.selections.providerMode === "manual"
+        ? (resolveRequestedProviders(params.selections) as string[])
+        : [],
+  };
+  const baseDir = resolveInitInstallerBaseDir({
+    scope: selections.scope,
+    cwd: params.cwd,
+    env: params.env,
+    homeDir: params.homeDir,
+  });
+  const quotaEdit = await planQuotaConfigEdit({ selections, quotaUiIntent, baseDir });
+  const edits = [
+    await planOpencodeEdit({
+      selections,
+      baseDir,
+      legacyQuotaToastToSync: params.syncLegacyConfig ? quotaEdit.plannedData : undefined,
+    }),
+    quotaEdit,
+  ];
+  if (quotaUiIntent.installTuiPlugin) {
+    edits.push(await planTuiEdit({ selections, baseDir }));
+  }
+
+  const quickSetupNotes = buildQuickSetupNotes(selections);
+  const warnings = edits.flatMap((edit) => edit.warnings);
+
+  const plan: InitInstallerPlan = {
+    selections,
+    baseDir,
+    edits,
+    warnings,
+    quickSetupNotes,
+    summaryLines: [],
+  };
+  plan.summaryLines = buildPlanSummary(plan);
+  return plan;
+}
+
+export async function applyInitInstallerPlan(
+  plan: InitInstallerPlan,
+): Promise<ApplyInitInstallerPlanResult> {
+  const writtenPaths: string[] = [];
+  const unchangedPaths: string[] = [];
+
+  for (const edit of plan.edits) {
+    if (!edit.changed || !edit.nextData) {
+      unchangedPaths.push(edit.path);
+      continue;
+    }
+
+    try {
+      await writeJsonAtomic(edit.path, edit.nextData, { trailingNewline: true });
+      writtenPaths.push(edit.path);
+    } catch (error) {
+      throw new InitInstallerError(`Failed writing ${edit.path}.`, {
+        path: edit.path,
+        writtenPaths,
+      });
+    }
+  }
+
+  return {
+    writtenPaths,
+    unchangedPaths,
+  };
+}
+
+async function promptForSelections(
+  prompts: PromptAdapter,
+): Promise<InitInstallerSelections | null> {
+  const scope = await prompts.select({
+    message: "Install scope",
+    options: [
+      { label: "Project config", value: "project", hint: "install only for this repo/worktree" },
+      { label: "Global OpenCode config", value: "global", hint: "install for all projects using your global config" },
+    ],
+  });
+  if (prompts.isCancel(scope)) return null;
+
+  const quotaUi = await prompts.multiselect({
+    message: "Quota UI",
+    required: true,
+    options: [
+      { label: "Toast", value: "toast", hint: "popup quota summaries after idle/question/compact events" },
+      { label: "Sidebar panel", value: "sidebar", hint: "full Quota panel in the OpenCode session sidebar" },
+      { label: "Compact status line", value: "compact_status", hint: "short quota summary in the TUI status area" },
+      {
+        label: "No automatic UI surfaces",
+        value: "none",
+        hint: "no toast, sidebar, compact status, or TUI dialogs; server slash commands stay installed",
+      },
+    ],
+  });
+  if (prompts.isCancel(quotaUi)) return null;
+  if (!Array.isArray(quotaUi)) {
+    throw new InitInstallerError("Quota UI requires selected options.");
+  }
+
+  const providerMode = await prompts.select({
+    message: "Provider mode",
+    options: [
+      { label: "Auto-detect providers", value: "auto", hint: "recommended; use providers found in your OpenCode/auth setup" },
+      { label: "Choose providers manually", value: "manual", hint: "only track the providers you select" },
+    ],
+  });
+  if (prompts.isCancel(providerMode)) return null;
+
+  let manualProviders: string[] = [];
+  if (providerMode === "manual") {
+    const selected = await prompts.multiselect({
+      message: "Manual providers",
+      required: true,
+      options: getInstallerProviderPromptOptions(),
+    });
+    if (prompts.isCancel(selected)) return null;
+    if (!Array.isArray(selected) || selected.length === 0) {
+      throw new InitInstallerError("Manual provider mode requires at least one selected provider.");
+    }
+    manualProviders = selected.filter((value): value is string => typeof value === "string");
+  }
+
+  const formatStyle = await prompts.select({
+    message: "Quota reset periods",
+    options: [
+      {
+        label: "All reset periods per provider (all windows; compare every tracked reset period)",
+        value: "allWindows",
+      },
+      {
+        label: "One reset period per provider (single window; best for quick quota checks)",
+        value: "singleWindow",
+      },
+    ],
+  });
+  if (prompts.isCancel(formatStyle)) return null;
+
+  const percentDisplayMode = await prompts.select({
+    message: "Quota percentage meaning",
+    options: [
+      { label: "Remaining quota", value: "remaining", hint: "show how much quota is left" },
+      { label: "Used quota", value: "used", hint: "show how much quota has been consumed" },
+    ],
+  });
+  if (prompts.isCancel(percentDisplayMode)) return null;
+
+  const showSessionTokens = await prompts.select({
+    message: "Session token details",
+    options: [
+      { label: "Hide session tokens", value: "no", hint: "keep quota output shorter" },
+      { label: "Show session tokens", value: "yes", hint: "include current session input/output token counts when available" },
+    ],
+  });
+  if (prompts.isCancel(showSessionTokens)) return null;
+
+  const maintainerAnnouncements = await prompts.confirm({
+    message: "Show bundled maintainer notices automatically when available?",
+    initialValue: true,
+  });
+  if (prompts.isCancel(maintainerAnnouncements)) return null;
+
+  return {
+    scope: scope as InitInstallerScope,
+    quotaUi: quotaUi.filter((value): value is InitQuotaUiChoice => typeof value === "string"),
+    providerMode: providerMode as InitProviderMode,
+    manualProviders,
+    formatStyle: formatStyle as CanonicalQuotaFormatStyle,
+    percentDisplayMode: percentDisplayMode as QuotaToastConfig["percentDisplayMode"],
+    showSessionTokens: showSessionTokens === "yes",
+    maintainerAnnouncements: maintainerAnnouncements !== false,
+  };
+}
+
+export async function runInitInstaller(params?: {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  prompts?: PromptAdapter;
+  syncLegacyConfig?: boolean;
+}): Promise<number> {
+  const prompts = params?.prompts ?? ((await import("@clack/prompts")) as unknown as PromptAdapter);
+
+  prompts.intro("Configure @slkiser/opencode-quota");
+
+  try {
+    const selections = await promptForSelections(prompts);
+    if (!selections) {
+      prompts.outro("Cancelled");
+      return 0;
+    }
+
+    const plan = await planInitInstaller({
+      selections,
+      cwd: params?.cwd,
+      env: params?.env,
+      homeDir: params?.homeDir,
+      syncLegacyConfig: params?.syncLegacyConfig,
+    });
+
+    for (const line of plan.summaryLines) {
+      prompts.log.info(line);
+    }
+
+    if (!plan.edits.some((edit) => edit.changed)) {
+      prompts.outro(`No changes needed — ${GITHUB_STAR_NOTE}`);
+      return 0;
+    }
+
+    const confirmed = await prompts.confirm({
+      message: "Apply these changes?",
+      initialValue: true,
+    });
+    if (prompts.isCancel(confirmed) || !confirmed) {
+      prompts.outro("Cancelled");
+      return 0;
+    }
+
+    const result = await applyInitInstallerPlan(plan);
+    for (const path of result.writtenPaths) {
+      prompts.log.success(`Wrote ${path}`);
+    }
+    for (const path of result.unchangedPaths) {
+      prompts.log.info(`Unchanged ${path}`);
+    }
+
+    if (plan.quickSetupNotes.length > 0) {
+      prompts.log.info("Manual quick-setup still needed:");
+      for (const note of plan.quickSetupNotes) {
+        prompts.log.info(`- ${note.label}: README.md#${note.anchor}`);
+      }
+    }
+
+    prompts.outro(`Quota init complete — ${GITHUB_STAR_NOTE}`);
+    return 0;
+  } catch (error) {
+    if (error instanceof InitInstallerError) {
+      prompts.log.error(error.message);
+      if (error.details?.writtenPaths?.length) {
+        prompts.log.info(`Already written: ${error.details.writtenPaths.join(", ")}`);
+      }
+    } else {
+      prompts.log.error(error instanceof Error ? error.message : String(error));
+    }
+    prompts.outro("Quota init failed");
+    return 1;
+  }
+}
