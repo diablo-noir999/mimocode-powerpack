@@ -1,8 +1,8 @@
 /**
  * Test: Hooks + Utility Modules
  * Covers: dedup-prune, error-prune, intent-gate, comment-checker, rules-injector,
- *         model-fallback, hashline-read-enhancer, transform-pipeline, notify,
- *         todo-enforcer, hashline-utils, memory-utils, message-utils, team/utils
+ *         model-fallback, transform-pipeline, notify,
+ *         todo-enforcer, memory-utils, message-utils, team/utils
  * Run: bun run test/test-hooks.ts
  */
 
@@ -233,46 +233,6 @@ const commentChecker = createCommentCheckerHook()
   assert(output.content === undefined, "comment-checker handles missing content gracefully")
 }
 
-// === Hashline Read Enhancer Hook ===
-section("Hashline Read Enhancer Hook")
-const { createHashlineReadEnhancerHook } = await import("../src/hooks/hashline-read-enhancer")
-const hashEnhancer = createHashlineReadEnhancerHook()
-
-// Test: enhances read output with hash tags
-{
-  const input: HookInput = { tool: "read", filePath: "/home/ir192m2/Documents/LLMs/mimocode-powerpack/src/server.ts" } as any
-  const output: HookOutput = {
-    content: "line 1\nline 2\nline 3"
-  }
-  await hashEnhancer(input, output)
-  assert(output.content!.includes("#"), "hashline-read-enhancer adds hash tags to output")
-  assert(output.content!.includes("line 1"), "hashline-read-enhancer preserves original line content")
-  const lineCount = output.content!.split("\n").length
-  assertEq(lineCount, 3, "hashline-read-enhancer preserves line count")
-}
-
-// Test: each line gets a unique hash
-{
-  const input: HookInput = { tool: "read", filePath: "/home/ir192m2/Documents/LLMs/mimocode-powerpack/src/server.ts" } as any
-  const output: HookOutput = {
-    content: "line A\nline B\nline C"
-  }
-  await hashEnhancer(input, output)
-  const lines = output.content!.split("\n")
-  const hashes = lines.map((l: string) => l.split("#")[1]?.split("|")[0]).filter(Boolean)
-  const uniqueHashes = new Set(hashes)
-  assertEq(uniqueHashes.size, 3, "hashline-read-enhancer gives each line a unique hash")
-}
-
-// Test: non-read tools pass through
-{
-  const input: HookInput = { tool: "bash" } as any
-  const output: HookOutput = { content: "output" }
-  const originalContent = output.content
-  await hashEnhancer(input, output)
-  assertEq(output.content, originalContent, "hashline-read-enhancer leaves non-read output unchanged")
-}
-
 // === Rules Injector Hook ===
 section("Rules Injector Hook")
 const { createRulesInjectorHook } = await import("../src/hooks/rules-injector")
@@ -470,52 +430,6 @@ const { createTodoEnforcerHook } = await import("../src/hooks/todo-enforcer")
   const todoEnforcer = createTodoEnforcerHook({ enabled: true, maxFailures: 5, cooldownMs: 30000 })
   const result = await todoEnforcer({ type: "unknown.event" })
   assert(result === undefined, "todo-enforcer handles unknown event type without crashing")
-}
-
-// ============================================================
-// === Hashline Utils ===
-// ============================================================
-section("Hashline Utils")
-const { computeLineHash } = await import("../src/tools/hashline-utils")
-
-// Test: same input produces same hash
-{
-  const hash1 = computeLineHash("hello world")
-  const hash2 = computeLineHash("hello world")
-  assertEq(hash1, hash2, "computeLineHash is deterministic for same input")
-}
-
-// Test: different input produces different hash
-{
-  const hash1 = computeLineHash("hello world")
-  const hash2 = computeLineHash("hello world!")
-  assert(hash1 !== hash2, "computeLineHash produces different hashes for different input")
-}
-
-// Test: empty string produces a hash
-{
-  const hash = computeLineHash("")
-  assert(typeof hash === "string" && hash.length > 0, "computeLineHash returns non-empty hash for empty string")
-}
-
-// Test: hash is always a string of expected length
-{
-  const hash = computeLineHash("test content here")
-  assert(typeof hash === "string", "computeLineHash returns a string")
-  assertEq(hash.length, 8, "computeLineHash returns an 8-character hash")
-}
-
-// Test: hash only contains valid characters from the hash alphabet
-{
-  const hash = computeLineHash("anything")
-  assertMatch(hash, /^[ZPMQVRWSNKTXJBYH]{8}$/, "computeLineHash uses only valid hash characters")
-}
-
-// Test: long input produces valid hash
-{
-  const longInput = "a".repeat(10000)
-  const hash = computeLineHash(longInput)
-  assertEq(hash.length, 8, "computeLineHash handles long input")
 }
 
 // ============================================================

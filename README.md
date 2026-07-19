@@ -6,7 +6,7 @@ A comprehensive plugin bundle for [MiMoCode](https://mimo.xiaomi.com/mimocode/st
 
 ### Ultracode Mode
 
-A Tab-switchable build mode (`#21c5c2`) that merges the default MiMoCode system prompt with aggressive powerpack tool-usage instructions. Tab to "ultracode" to get an agent that always uses `hashline_edit`, `memory_search`, specialized subagents, and skill loading by default.
+A Tab-switchable build mode (`#21c5c2`) that merges the default MiMoCode system prompt with aggressive powerpack tool-usage instructions. Tab to "ultracode" to get an agent that always uses `memory_search`, `edit`, specialized subagents, and skill loading by default.
 
 Deployed to `~/.config/mimocode/modes/ultracode.md`. The mode file contains the full Build mode prompt plus powerpack directives — no separate hook injection needed.
 
@@ -14,7 +14,7 @@ Deployed to `~/.config/mimocode/modes/ultracode.md`. The mode file contains the 
 
 The plugin ships a comprehensive AGENTS.md with:
 - **Boot sequence** — 3-step startup: `memory_search` → `task create` → `context_breakdown`
-- **Tool usage guides** — step-by-step workflows for every plugin tool (`hashline_edit`, `memory_search`, `memory_write`, `actor_guide`, `ralph_loop`, `review_*`)
+- **Tool usage guides** — step-by-step workflows for every plugin tool (`memory_search`, `memory_write`, `actor_guide`, `ralph_loop`, `review_*`)
 - **Worked examples** — concrete end-to-end examples for bug fixes, features, code reviews, security audits, and refactors
 - **Dispatch tables** — which agent/skill/tool to use for each situation
 - **Periodic nudges** — the tool discovery hook injects reminders every 15 messages so the agent doesn't forget about plugin tools mid-session
@@ -68,7 +68,6 @@ const results = await indexer.search(
 - **Safety Net** — semantic destructive-command blocking (analyzes git, rm, find commands for dangerous intent)
 
 ### Tools
-- **Hashline Edit** — hash-anchored edits that eliminate stale-line errors (workspace-contained)
 - **Loop-Until-Done** — autonomous loop that repeats until task completion
 - **Memory Search/Write** — persistent knowledge base with deduplication
 - **Context Breakdown** — token usage analysis
@@ -135,7 +134,7 @@ bun run test/test-compat-quota.ts
 
 | Suite | Module | Tests |
 |-------|--------|-------|
-| hooks | dedup-prune, error-prune, intent-gate, comment-checker, hashline-read-enhancer, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, hashline-utils, memory-utils, message-utils, team/utils | ~109 |
+| hooks | dedup-prune, error-prune, intent-gate, comment-checker, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, memory-utils, message-utils, team/utils | ~109 |
 | memory | MemoryStore CRUD, dedup, expiry, captureMemory, captureFromSession, FTS/TF-IDF search, decay math, batch operations | ~128 |
 | compression | Content router, JSON crusher, code compressor, compress index | ~52 |
 | cache-layout | classifyCacheZone, bust severity, stability score, boundary detection | ~37 |
@@ -144,7 +143,7 @@ bun run test/test-compat-quota.ts
 | skills | YAML parser, skill installer, skill metadata | ~34 |
 | team | Mailbox (send/receive/ack/broadcast, path traversal protection), tasklist (create/claim/update, contention) | ~34 |
 | token-utils | estimateTextTokens, estimateMessageTokens | ~18 |
-| compat-quota | QuotaService, ReviewServer, Kimaki config, RalphLoop, HashlineEdit | ~57 |
+| compat-quota | QuotaService, ReviewServer, Kimaki config, RalphLoop | ~57 |
 
 ## Installation
 
@@ -156,7 +155,6 @@ bun run test/test-compat-quota.ts
     ["/path/to/mimocode-powerpack", {
       "powerpack": {
         "notify": { "enabled": true, "quietHours": { "start": "22:00", "end": "08:00" } },
-        "hashline": { "enabled": true },
         "todoEnforcer": { "enabled": true, "maxFailures": 5, "cooldownMs": 30000 },
         "commentChecker": { "enabled": true },
         "rulesInjector": { "enabled": true },
@@ -204,7 +202,6 @@ All options in the `powerpack` config section:
 |--------|---------|-------------|
 | `notify.enabled` | `true` | OS notifications |
 | `notify.quietHours` | `22:00-08:00` | Do-not-disturb window |
-| `hashline.enabled` | `true` | Hashline edit tool |
 | `todoEnforcer.enabled` | `true` | Idle session detection |
 | `todoEnforcer.maxFailures` | `5` | Max idle cycles before stop |
 | `commentChecker.enabled` | `true` | AI slop detection on edits |

@@ -24,24 +24,6 @@ That's it. Three calls, then work.
 
 ## How to Use Each Tool
 
-### hashline_edit — the ONLY way to edit files
-
-**Wrong:** calling `edit` or `bash sed` directly.
-
-**Right:**
-```
-1. read("src/auth.ts")
-   → output has LINE#HASH tags: "42#A3F2 const user = getUser()"
-
-2. hashline_edit("src/auth.ts", [
-     { line: 42, hash: "A3F2", old_content: "const user = getUser()", new_content: "const user = getUser(); if (!user) return null;" }
-   ])
-```
-
-The hash proves you read the current version. Without it, you're editing stale content. `hashline_read-enhancer` adds tags automatically on every read — use them.
-
----
-
 ### memory_search — before every task, before every design decision
 
 ```
@@ -212,7 +194,6 @@ Load with `skill("name")`. Match skill to stage.
 - `comment-checker` — anti-slop on edits
 - `dedup-prune` — tool call deduplication
 - `error-prune` — error input pruning
-- `hashline-read-enhancer` — adds LINE#HASH tags on every read (required for hashline_edit)
 - `transform-pipeline` — context pruning + cache layout
 - `safety-net` — blocks dangerous git/rm/find operations
 - Proximity-aware rules injection near edited files
@@ -231,7 +212,7 @@ The plugin ships 10 test suites under `test/` with 529+ tests. Run `bun run test
 **Test structure:** Each suite uses a flat assert/assertEq pattern (no test framework). Sections group related tests. Exit code 0 = pass, 1 = fail.
 
 **Key test files:**
-- `test-hooks.ts` — all hooks + utility modules (dedup, error-prune, intent-gate, comment-checker, hashline-read-enhancer, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, hashline-utils, memory-utils, message-utils, team/utils)
+- `test-hooks.ts` — all hooks + utility modules (dedup, error-prune, intent-gate, comment-checker, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, memory-utils, message-utils, team/utils)
 - `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF), decay math, batch ops
 - `test-compression.ts` — content-router, json-crusher, code-compressor, compress index
 - `test-cache-layout.ts` — m0/m1/m2 zone classification, bust severity, stability score
@@ -240,7 +221,7 @@ The plugin ships 10 test suites under `test/` with 529+ tests. Run `bun run test
 - `test-decay-render.ts` — compartment rendering, tier logic, M0 block extraction
 - `test-skills.ts` — YAML parser, skill installer, metadata
 - `test-team.ts` — mailbox (send/receive/ack, path traversal), tasklist (create/claim, contention)
-- `test-compat-quota.ts` — QuotaService, ReviewServer, Kimaki config, RalphLoop, HashlineEdit
+- `test-compat-quota.ts` — QuotaService, ReviewServer, Kimaki config, RalphLoop
 
 ---
 
@@ -256,11 +237,12 @@ task create "Fix token expiry bug in auth.ts"   → T1
 task start T1
 
 read("src/auth.ts")
-→ line 87#C4A1: if (token.iat < Date.now()) throw new AuthError()
+→ line 87: if (token.iat < Date.now()) throw new AuthError()
 
-hashline_edit("src/auth.ts", [
-  { line: 87, hash: "C4A1", old_content: "if (token.iat < Date.now()) throw new AuthError()", new_content: "if (token.exp < Date.now() / 1000) throw new AuthError()" }
-])
+edit("src/auth.ts", { 
+  old_string: "if (token.iat < Date.now()) throw new AuthError()", 
+  new_string: "if (token.exp < Date.now() / 1000) throw new AuthError()" 
+})
 
 skill("validation-pipeline")
 → all tests pass
@@ -287,7 +269,7 @@ task create "Implement rate-limit middleware"   → T1.1
 task start T1.1
 skill("build")
 → write middleware/rateLimit.ts
-→ hashline_edit to wire it into routes/index.ts
+→ edit to wire it into routes/index.ts
 
 skill("validation-pipeline")
 task done T1.1
@@ -328,7 +310,7 @@ memory_search("test failures")
 
 // if that's not the issue:
 ralph_loop({
-  prompt: "Run the test suite. For each failure, read the relevant file, identify the cause, fix it with hashline_edit, then re-run. Stop when all tests pass.",
+  prompt: "Run the test suite. For each failure, read the relevant file, identify the cause, fix it with edit, then re-run. Stop when all tests pass.",
   completion_signal: "All tests pass"
 })
 ```

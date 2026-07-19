@@ -11,7 +11,6 @@ const TOOL_DISCOVERY_CONTEXT = `## Powerpack Tools Available
 
 You have these additional tools:
 - **memory_search** / **memory_write**: Persistent memory across sessions
-- **hashline_edit**: Edit files using LINE#HASH (prevents stale edits)
 - **context_breakdown**: Show token usage breakdown
 - **ralph_loop**: Repeat prompt until completion signal
 - **actor_guide**: Get JSON format for spawning subagents
@@ -23,7 +22,7 @@ You have these additional tools:
 
 Subagent dispatch: prefer "spawn" (background, non-blocking) over "run" (blocking). Use "wait" only when you need the result before proceeding.`
 
-const PERIODIC_NUDGE = `[Powerpack reminder] Use hashline_edit (not edit) for file edits. Use memory_search before tasks and memory_write after decisions. Use actor_guide before spawning subagents. Prefer spawn over run.`
+const PERIODIC_NUDGE = `[Powerpack reminder] Use memory_search before tasks and memory_write after decisions. Use actor_guide before spawning subagents. Prefer spawn over run.`
 
 export function createToolDiscoveryHook() {
   return async (input: HookInput, output: HookOutput) => {

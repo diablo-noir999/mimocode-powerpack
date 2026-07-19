@@ -328,14 +328,5 @@ const { createRalphLoopTool } = await import("../src/tools/ralph-loop")
   assert(result.includes("Max iterations**: 20"), "default max_iterations is 20")
 }
 
-// === Hashline Edit Tool ===
-section("Hashline Edit Tool")
-const { createHashlineEditTool } = await import("../src/tools/hashline-edit")
-{
-  const tool = createHashlineEditTool({})
-  assert(tool !== null, "hashline-edit tool creates successfully")
-  assert(typeof tool.execute === "function", "hashline-edit has execute method")
-}
-
 console.log(`\n=== Compat/Quota/Review Tests: ${passed} passed, ${failed} failed ===`)
 process.exit(failed > 0 ? 1 : 0)

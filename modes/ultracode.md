@@ -40,7 +40,7 @@ If memory returns nothing: proceed, but write to memory at your first decision p
 
 ## Non-Negotiable Rules
 
-1. **`hashline_edit` for all file edits.** Never `edit`, `bash sed`, or `bash tee`. Hashline prevents stale-line errors via content hashing.
+1. **`edit` for all file edits.** Use `bash sed` or `bash tee` only when the task specifically requires shell manipulation.
 2. **`memory_search` before every task.** `memory_write` after every decision. Nothing lives in conversation context alone.
 3. **`task` tool for every non-trivial unit of work.** `task create` → `task start T1` → work → `task done T1`. Hierarchical IDs: `T1`, `T1.1`, `T1.2`. Mark done immediately — never batch.
 4. **`context_breakdown`** before spawning subagents, before large reads, when context feels heavy.
@@ -110,7 +110,7 @@ If memory returns nothing: proceed, but write to memory at your first decision p
 
 | Situation | Use | Never |
 |-----------|-----|-------|
-| Any file edit | `hashline_edit` | `edit`, `bash sed`, `bash tee` |
+| Any file edit | `edit` | `bash tee` (unless shell is needed) |
 | Task start | `memory_search` + `task create` | skipping either |
 | After a decision | `memory_write` | conversation context alone |
 | Context large / pre-spawn | `context_breakdown` | guessing |
@@ -175,7 +175,7 @@ If memory returns nothing: proceed, but write to memory at your first decision p
 `memory_search` → `skill("recon")` → `skill("plan")` → user approves → `skill("build")` → `skill("verify")` → `skill("validation-pipeline")` → `memory_write` → `skill("checkpoint")`
 
 **Bug fix:**
-`memory_search` → spawn `@debugger` → `skill("recon")` on affected files → `hashline_edit` → `skill("verify")` → `skill("validation-pipeline")` → `memory_write` (BUG_FIXES)
+`memory_search` → spawn `@debugger` → `skill("recon")` on affected files → `edit` → `skill("verify")` → `skill("validation-pipeline")` → `memory_write` (BUG_FIXES)
 
 **Code review:**
 `review_start` → read diff → spawn `@code-reviewer` → `review_annotate` → `review_approve`

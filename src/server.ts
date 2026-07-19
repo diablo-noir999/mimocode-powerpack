@@ -4,7 +4,7 @@
  * A comprehensive plugin bundle for MiMoCode providing:
  * - Context management (analysis, dedup, error pruning)
  * - Agent behavior hooks (intent gate, todo enforcer, comment checker, rules injection, model fallback)
- * - Tools (hashline edit, loop-until-done)
+ * - Tools (loop-until-done)
  * - Notifications (native OS)
  * - Quota tracking (22+ providers + MiMo)
  * - 8 generic subagents
@@ -14,7 +14,6 @@ import type { Plugin } from "@mimo-ai/plugin"
 
 // Tool imports
 import { createContextAnalysisTool } from "./tools/context-analysis"
-import { createHashlineEditTool } from "./tools/hashline-edit"
 import { createRalphLoopTool } from "./tools/ralph-loop"
 import { createSkillsInstallTool } from "./tools/skills-install"
 import { createSkillsSyncTool } from "./tools/skills-sync"
@@ -41,7 +40,6 @@ import { createCommentCheckerHook } from "./hooks/comment-checker"
 import { createRulesInjectorHook } from "./hooks/rules-injector"
 import { createModelFallbackHook } from "./hooks/model-fallback"
 import { createNotifyHook } from "./hooks/notify"
-import { createHashlineReadEnhancerHook } from "./hooks/hashline-read-enhancer"
 import { createQualityGateHook } from "./hooks/quality-gate"
 import { createToolDiscoveryHook } from "./hooks/tool-discovery"
 import { createSafetyNetHook } from "./hooks/safety-net"
@@ -65,9 +63,6 @@ export interface PowerpackOptions {
   }
   quota?: {
     providers?: string[]
-  }
-  hashline?: {
-    enabled?: boolean
   }
   todoEnforcer?: {
     enabled?: boolean
@@ -143,7 +138,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   const config = {
     notify: { enabled: true, quietHours: { start: "22:00", end: "08:00" } },
     quota: { providers: ["mimo", "copilot", "openai"] },
-    hashline: { enabled: true },
     todoEnforcer: { enabled: true, maxFailures: 5, cooldownMs: 30000 },
     commentChecker: { enabled: true },
     rulesInjector: { enabled: true },
@@ -201,9 +195,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
         return lines.join("\n")
       },
     }),
-  }
-  if (config.hashline.enabled) {
-    tools.hashline_edit = createHashlineEditTool(ctx)
   }
   if (config.loopUntilDone.enabled) {
     tools.ralph_loop = createRalphLoopTool(ctx)
@@ -278,7 +269,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   const cachedErrorHook = config.errorPrune.enabled ? createErrorPruneHook(config.errorPrune.turnsBeforePrune) : null
   const cachedTransformHook = config.transform.enabled ? createTransformPipelineHook('', config.transform as TransformPipelineConfig) : null
   const cachedIntentHook = config.intentGate.enabled ? createIntentGateHook() : null
-  const cachedHashlineHook = config.hashline.enabled ? createHashlineReadEnhancerHook() : null
   const cachedCommentHook = config.commentChecker.enabled ? createCommentCheckerHook() : null
   const cachedRulesHook = config.rulesInjector.enabled ? createRulesInjectorHook(ctx) : null
   const cachedModelFallbackHook = config.modelFallback.enabled ? createModelFallbackHook() : null
@@ -308,11 +298,8 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
     }
   }
 
-  // Tool lifecycle: hashline read enhancer + comment checker + skill usage tracking
+  // Tool lifecycle: comment checker + skill usage tracking
   hooks["tool.execute.after"] = async (input: any, output: any) => {
-    if (cachedHashlineHook && input.tool === "read") {
-      await cachedHashlineHook(input, output)
-    }
     if (cachedCommentHook && (input.tool === "edit" || input.tool === "write")) {
       await cachedCommentHook(input, output)
     }

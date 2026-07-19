@@ -102,7 +102,6 @@ ENDCONFIG
     echo '    ["'"$PLUGIN_DIR"'", {'
     echo '      "powerpack": {'
     echo '        "notify": { "enabled": true, "quietHours": { "start": "22:00", "end": "08:00" } },'
-    echo '        "hashline": { "enabled": true },'
     echo '        "todoEnforcer": { "enabled": true, "maxFailures": 5, "cooldownMs": 30000 },'
     echo '        "commentChecker": { "enabled": true },'
     echo '        "rulesInjector": { "enabled": true },'
