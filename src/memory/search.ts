@@ -11,6 +11,7 @@ import { MemoryStore, type MemoryRow } from "./store";
 import { embed, isEmbeddingsReady, DEFAULT_EMBEDDING_MODEL } from "./embeddings";
 import { searchVector, blendResults } from "./vector-store";
 import { rowToMemory } from "./memory-utils";
+import type { KnowledgeGraph } from "./knowledge-graph";
 
 /** FTS query result row — MemoryRow plus computed bm25_score */
 interface FtsRow extends MemoryRow {
@@ -18,8 +19,9 @@ interface FtsRow extends MemoryRow {
 }
 
 const DEFAULT_SEARCH_LIMIT = 10;
+const FEEDBACK_INFLUENCE = 0.3;
 
-export type SearchMode = "hybrid" | "semantic" | "fts" | "tfidf";
+export type SearchMode = "hybrid" | "semantic" | "fts" | "tfidf" | "graph";
 
 // === FTS5 Query Sanitization (from magic-context) ===
 
@@ -219,6 +221,7 @@ export function searchTFIDF(
  *  - "semantic": vector-only search (requires embeddings enabled)
  *  - "fts": BM25-only (lexical)
  *  - "tfidf": TF-IDF cosine only (lightweight semantic fallback)
+ *  - "graph": knowledge graph search (concept traversal)
  */
 export async function searchMemories(
   store: MemoryStore,
@@ -227,6 +230,11 @@ export async function searchMemories(
   limit = DEFAULT_SEARCH_LIMIT,
   mode: SearchMode = "hybrid",
 ): Promise<SearchResult[]> {
+  // Graph mode: search knowledge graph for related concepts
+  if (mode === "graph") {
+    return searchGraph(store, projectPath, query, limit);
+  }
+
   // Semantic-only or hybrid with embeddings
   if ((mode === "semantic" || mode === "hybrid") && isEmbeddingsReady()) {
     const queryEmbedding = await embed(query);
@@ -235,7 +243,8 @@ export async function searchMemories(
       if (mode === "semantic") {
         const allMemories = store.getByProject(projectPath);
         const vectorStore = store.getVectorStore();
-        return searchVector(vectorStore, projectPath, DEFAULT_EMBEDDING_MODEL, queryEmbedding, allMemories, limit);
+        const results = searchVector(vectorStore, projectPath, DEFAULT_EMBEDDING_MODEL, queryEmbedding, allMemories, limit);
+        return applyFeedbackWeight(results);
       }
 
       // Hybrid: blend vector + BM25
@@ -245,20 +254,20 @@ export async function searchMemories(
       const vectorResults = searchVector(vectorStore, projectPath, DEFAULT_EMBEDDING_MODEL, queryEmbedding, allMemories, limit);
 
       if (vectorResults.length === 0 && ftsResults.length === 0) return [];
-      if (vectorResults.length === 0) return ftsResults.slice(0, limit);
-      if (ftsResults.length === 0) return vectorResults.slice(0, limit);
+      if (vectorResults.length === 0) return applyFeedbackWeight(ftsResults.slice(0, limit));
+      if (ftsResults.length === 0) return applyFeedbackWeight(vectorResults.slice(0, limit));
 
-      return blendResults(ftsResults, vectorResults, limit);
+      return applyFeedbackWeight(blendResults(ftsResults, vectorResults, limit));
     }
   }
 
   // FTS-only mode or embeddings unavailable — fall back to original behavior
   const ftsResults = searchFTS(store, projectPath, query, limit);
 
-  if (mode === "fts") return ftsResults.slice(0, limit);
+  if (mode === "fts") return applyFeedbackWeight(ftsResults.slice(0, limit));
 
   if (ftsResults.length >= limit) {
-    return ftsResults.slice(0, limit);
+    return applyFeedbackWeight(ftsResults.slice(0, limit));
   }
 
   // Fill remaining with TF-IDF results not already found
@@ -275,7 +284,7 @@ export async function searchMemories(
   }
 
   // Re-rank by blending scores
-  return combined.sort((a, b) => b.score - a.score);
+  return applyFeedbackWeight(combined.sort((a, b) => b.score - a.score));
 }
 
 /**
@@ -314,4 +323,74 @@ export async function backfillEmbeddings(
   }
 
   return totalEmbedded;
+}
+
+// === Feedback-Weighted Retrieval ===
+
+/**
+ * Compute average feedback score for a memory from its feedback payload.
+ * Returns null if no feedback payload exists.
+ */
+function getAverageFeedback(memory: Memory): number | null {
+  if (!memory.payload || memory.payload.type !== "feedback") return null;
+  return memory.payload.score;
+}
+
+/**
+ * Apply feedback multiplier to search results.
+ * finalScore = blendedScore * (1 + feedbackInfluence * avgFeedback)
+ */
+export function applyFeedbackWeight(results: SearchResult[]): SearchResult[] {
+  return results.map((r) => {
+    const feedback = getAverageFeedback(r.memory);
+    if (feedback === null) return r;
+    return {
+      ...r,
+      score: r.score * (1 + FEEDBACK_INFLUENCE * feedback),
+    };
+  });
+}
+
+// === Graph Search ===
+
+/**
+ * Search the knowledge graph for related concepts, return connected memories.
+ */
+export function searchGraph(
+  store: MemoryStore,
+  projectPath: string,
+  query: string,
+  limit = DEFAULT_SEARCH_LIMIT,
+): SearchResult[] {
+  const kg = store.getKnowledgeGraph();
+  const nodes = kg.searchNodes(projectPath, query, limit);
+  if (nodes.length === 0) return [];
+
+  const seenMemoryIds = new Set<number>();
+  const results: SearchResult[] = [];
+
+  for (const node of nodes) {
+    const connections = kg.getConnections(node.id);
+    for (const edge of connections) {
+      const neighborId = edge.sourceId === node.id ? edge.targetId : edge.sourceId;
+      const neighbor = kg.getNode(neighborId);
+      if (!neighbor) continue;
+
+      // Try to find a memory with matching name in the project
+      const memories = store.getByProject(projectPath);
+      for (const mem of memories) {
+        if (seenMemoryIds.has(mem.id)) continue;
+        if (mem.content.toLowerCase().includes(neighbor.name.toLowerCase()) ||
+            mem.content.toLowerCase().includes(neighbor.content.toLowerCase())) {
+          seenMemoryIds.add(mem.id);
+          results.push({ memory: mem, score: edge.weight, matchType: "combined" });
+          if (results.length >= limit) break;
+        }
+      }
+      if (results.length >= limit) break;
+    }
+    if (results.length >= limit) break;
+  }
+
+  return results;
 }

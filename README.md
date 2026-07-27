@@ -1,6 +1,6 @@
 # mimocode-powerpack
 
-A comprehensive plugin bundle for [MiMoCode](https://mimo.xiaomi.com/mimocode/start) — context management, memory with semantic search and embeddings, notifications, quota tracking, code review, team coordination, autonomous loops, skill management, Kimaki Discord integration, an Ultracode mode, and 14 specialized subagents.
+A comprehensive plugin bundle for [MiMoCode](https://mimo.xiaomi.com/mimocode/start) — context management, memory with semantic search, knowledge graph, brain map, embeddings, notifications, quota tracking, code review, team coordination, autonomous loops, skill management, Kimaki Discord integration, an Ultracode mode, and 14 specialized subagents.
 
 ## What's Included
 
@@ -17,18 +17,24 @@ The plugin ships a comprehensive AGENTS.md with:
 - **Tool usage guides** — step-by-step workflows for every plugin tool (`memory_search`, `memory_write`, `actor_guide`, `ralph_loop`, `review_*`)
 - **Worked examples** — concrete end-to-end examples for bug fixes, features, code reviews, security audits, and refactors
 - **Dispatch tables** — which agent/skill/tool to use for each situation
-- **Periodic nudges** — the tool discovery hook injects reminders every 15 messages so the agent doesn't forget about plugin tools mid-session
+- **Durable workflows** — the agent always knows to use `memory_search`, `actor_guide`, `spawn`, `task`, and `skill()` via the persistent mode prompt and AGENTS.md
 
 ### Context Management
 - **Context Analysis** — `context_breakdown` tool with per-category and per-tool token breakdown
-- **Tool Deduplication** — automatically removes repeated identical tool calls
-- **Error Purging** — cleans up errored tool inputs after configurable turns
+- **Tool Deduplication** — automatically deduplicates identical tool calls via WithParts format (assistant message parts[])
+- **Error Purging** — prunes errored tool inputs after configurable turns via WithParts format
 - **Transform Pipeline** — smart context pruning, cache layout optimization, session facts extraction
 
 ### Memory & Search
 - **Memory Store** — SQLite-backed persistent memory with 8-category taxonomy
 - **Tiered Decay** — automatic memory expiration based on importance and age
 - **BM25 + Vector Search** — hybrid full-text + semantic search with Granite embeddings (384-dim, local ONNX inference)
+- **Knowledge Graph** — lightweight SQLite graph (kg_nodes + kg_edges) with typed concepts, files, functions, decisions; supports k-hop traversal, FTS search, subgraph extraction, and feedback-weighted edges
+- **Typed Memory Payloads** — structured entries (QA, Trace, Feedback, SkillRun) alongside plain text memories, inspired by cognee's discriminated union pattern
+- **Feedback-Weighted Retrieval** — search results boosted/reduced by feedback scores (configurable influence factor)
+- **Graph Search Mode** — new `mode: "graph"` in searchMemories traverses the knowledge graph for related concepts and returns connected memories
+- **Brain Map** — Obsidian-style knowledge vault at `.mimocode/context/` with raw/wiki/output structure, generated from session checkpoints + memory DB + knowledge graph via `skill("brain-map")`
+- **Session Cache** — in-memory LRU cache (100 entries) for fast recall of recent Q&A turns and trace steps
 - **Codebase Semantic Search** — indexes source files via `CodeIndexer` with tree-sitter AST chunking, stores embeddings for cosine similarity search
 - **Auto-Capture** — extracts structured facts (TOOL_CALL, FILE_CHANGE, DECISION, ERROR_PATTERN, CONFIG_CHANGE) from completed sessions
 - **Historian/Dreamer/Sidekick** — compartment-based history compression (P1-P4 tiers), overnight memory consolidation (11 task types), and memory retrieval augmentation
@@ -64,7 +70,7 @@ const results = await indexer.search(
 - **Comment Checker** — catches AI slop in comments (em dashes, filler words)
 - **Rules Injection** — proximity-aware rule discovery near edited files with YAML frontmatter, source priority, and char budgets
 - **Model Fallback** — reactive model switching on errors with cooldowns
-- **Tool Discovery** — auto-injects tool context into new conversations + periodic reminders every 15 messages
+- **Tool Discovery** — temporarily disabled for MiMoCode v0.1.7+ (system-level hints need re-implementation via `system.transform` hook)
 - **Safety Net** — semantic destructive-command blocking (analyzes git, rm, find commands for dangerous intent)
 
 ### Tools
@@ -77,7 +83,7 @@ const results = await indexer.search(
 - **Content-Aware Compression** — JSON array compression (SmartCrusher pattern) and AST-aware code compression with content-type routing
 
 ### Skill Management
-- **17 Built-in Skills** — adversarial-review, build, checkpoint, coding-guidelines, compress, context, grilling, improve, plan, ponytail, readme, recon, research, spec-writer, stop-slop, validation-pipeline, verify
+- **17 Built-in Skills** — adversarial-review, brain-map, build, checkpoint, coding-guidelines, compress, context, grilling, improve, plan, ponytail, readme, recon, research, spec-writer, stop-slop, validation-pipeline, verify
 - **Skill Usage Tracking** — tracks per-skill metrics (use count, view count, last used, state transitions)
 - **Proximity Rules Engine** — discovers and injects relevant AGENTS.md/CLAUDE.md files near edited code
 
@@ -113,7 +119,7 @@ const results = await indexer.search(
 
 ### Testing
 
-10 test suites with 529+ tests covering hooks, memory, skills, team coordination, compression, cache layout, smart drops, token estimation, and decay rendering.
+12 test suites with 530+ tests covering hooks, memory, knowledge graph, brain gathering, skills, team coordination, compression, cache layout, smart drops, token estimation, and decay rendering.
 
 ```bash
 # Run all tests
@@ -122,6 +128,8 @@ bun run test/run-all.ts
 # Run individual suites
 bun run test/test-hooks.ts
 bun run test/test-memory.ts
+bun run test/test-knowledge-graph.ts
+bun run test/test-brain-gather.ts
 bun run test/test-compression.ts
 bun run test/test-cache-layout.ts
 bun run test/test-smart-drops.ts
@@ -135,7 +143,8 @@ bun run test/test-compat-quota.ts
 | Suite | Module | Tests |
 |-------|--------|-------|
 | hooks | dedup-prune, error-prune, intent-gate, comment-checker, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, memory-utils, message-utils, team/utils | ~109 |
-| memory | MemoryStore CRUD, dedup, expiry, captureMemory, captureFromSession, FTS/TF-IDF search, decay math, batch operations | ~128 |
+| memory | MemoryStore CRUD, dedup, expiry, captureMemory, captureFromSession, FTS/TF-IDF search, decay math, batch operations, typed payloads, feedback-weighted search | ~138 |
+| knowledge-graph | Node/edge CRUD, k-hop traversal, FTS search, subgraph extraction, stats, cascade delete | ~42 |
 | compression | Content router, JSON crusher, code compressor, compress index | ~52 |
 | cache-layout | classifyCacheZone, bust severity, stability score, boundary detection | ~37 |
 | decay-render | renderDecayedCompartments, renderCompartmentAtTier, extractM0Block | ~32 |
@@ -144,6 +153,7 @@ bun run test/test-compat-quota.ts
 | team | Mailbox (send/receive/ack/broadcast, path traversal protection), tasklist (create/claim/update, contention) | ~34 |
 | token-utils | estimateTextTokens, estimateMessageTokens | ~18 |
 | compat-quota | QuotaService, ReviewServer, Kimaki config, RalphLoop | ~57 |
+| brain-gather | checkpoint parsing, session scanning, memory grouping, brain data gathering | ~40 |
 
 ## Installation
 
@@ -171,7 +181,7 @@ bun run test/test-compat-quota.ts
           "autoCapture": true,
           "embeddings": { "enabled": true, "model": "onnx-community/granite-embedding-small-english-r2-ONNX" }
         },
-        "transform": { "enabled": true, "smartDrops": true, "cacheLayout": true, "sessionFacts": true },
+        "transform": { "enabled": true, "smartDrops": true, "cacheLayout": true, "sessionFacts": true, "brainLoader": true, "brainLoaderMaxTokens": 8000 },
         "team": { "enabled": false },
         "review": { "enabled": false, "port": 5174 },
         "kimaki": { "enabled": false },
@@ -191,7 +201,7 @@ bun run test/test-compat-quota.ts
 The install script deploys:
 - **Agents** (14) to `~/.config/mimocode/agents/`
 - **Modes** (1) to `~/.config/mimocode/modes/` — Tab-switchable Ultracode
-- **Skills** (17) to `~/.config/mimocode/skills/`
+- **Skills** (18) to `~/.config/mimocode/skills/`
 - **Rules** to `~/.config/mimocode/AGENTS.md`
 
 ## Configuration
@@ -212,7 +222,7 @@ All options in the `powerpack` config section:
 | `errorPrune.turnsBeforePrune` | `4` | Turns before pruning errors |
 | `intentGate.enabled` | `true` | Keyword intent routing |
 | `safetyNet.enabled` | `true` | Semantic destructive-command blocking |
-| `toolDiscovery.enabled` | `true` | Tool context injection + periodic nudges |
+| `toolDiscovery.enabled` | `true` | No-op in v0.1.7+ (system context injection unavailable) |
 | `loopUntilDone.enabled` | `true` | Autonomous loop tool |
 | `skills.enabled` | `true` | Skill management |
 | `memory.enabled` | `true` | Memory store + search |

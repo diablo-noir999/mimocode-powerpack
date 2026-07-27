@@ -4,9 +4,20 @@
  * Row-to-Memory conversion shared between store and search.
  */
 
-import type { Memory } from "./types";
+import type { Memory, MemoryPayload, PayloadType } from "./types";
+
+function parsePayload(payloadType: string | null, payloadJson: string | null): { payloadType: PayloadType | null; payload: MemoryPayload | null } {
+  if (!payloadType || !payloadJson) return { payloadType: null, payload: null };
+  try {
+    const parsed = JSON.parse(payloadJson);
+    return { payloadType: payloadType as PayloadType, payload: parsed as MemoryPayload };
+  } catch {
+    return { payloadType: null, payload: null };
+  }
+}
 
 export function rowToMemory(row: any): Memory {
+  const { payloadType, payload } = parsePayload(row.payload_type ?? null, row.payload ?? null);
   return {
     id: row.id,
     projectPath: row.project_path,
@@ -25,5 +36,7 @@ export function rowToMemory(row: any): Memory {
     lastRetrievedAt: row.last_retrieved_at,
     status: row.status,
     expiresAt: row.expires_at,
+    payloadType,
+    payload,
   };
 }

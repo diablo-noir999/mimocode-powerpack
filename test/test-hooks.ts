@@ -42,57 +42,68 @@ section("Dedup Prune Hook")
 const { createDedupPruneHook } = await import("../src/hooks/dedup-prune")
 const dedupHook = createDedupPruneHook()
 
+// Helper: create a minimal WithParts-format user message
+function wpUser(text: string): any {
+  return { info: { role: "user", id: `u-${Math.random()}`, sessionID: "s", time: { created: 0 }, agent: "a", model: {} }, parts: [{ type: "text" as const, text }] }
+}
+
+// Helper: create a minimal WithParts-format assistant message with optional tool parts
+function wpAsst(text: string, tools?: any[]): any {
+  const parts: any[] = [{ type: "text" as const, text }]
+  if (tools) parts.push(...tools)
+  return { info: { role: "assistant", id: `a-${Math.random()}`, sessionID: "s", time: { created: 0 }, model: {} }, parts }
+}
+
+// Minimal completed tool part for dedup tests
+function completedTool(callID: string, tool: string, input: any, output: string): any {
+  return { type: "tool" as const, callID, tool, state: { status: "completed" as const, input, output, title: tool, metadata: {}, time: { start: 0, end: 1 } } }
+}
+
 // Test: removes duplicate tool calls
 {
-  const input: HookInput & { messages: any[] } = {
+  const input = {
     messages: [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi", tool_calls: [{ id: "call_1", function: { name: "read", arguments: '{"file_path":"/a"}' } }] },
-      { role: "tool", content: "file a", tool_call_id: "call_1" },
-      { role: "assistant", content: "hi", tool_calls: [{ id: "call_2", function: { name: "read", arguments: '{"file_path":"/a"}' } }] },
-      { role: "tool", content: "file a", tool_call_id: "call_2" },
+      wpUser("hello"),
+      wpAsst("hi", [completedTool("c1", "read", { file_path: "/a" }, "file a")]),
+      wpUser("again"),
+      wpAsst("ok", [completedTool("c2", "read", { file_path: "/a" }, "file a again")]),
     ],
   }
-  const output: HookOutput & { messages: any[] } = { messages: [...input.messages] }
+  const output = { messages: structuredClone(input.messages) }
   await dedupHook(input, output)
-  // The dedup hook replaces the OLDER duplicate's content with a placeholder
-  const prunedMsg = output.messages.find(
-    (m: any) => typeof m.content === "string" && m.content.includes("Duplicate") && m.content.includes("pruned")
-  )
-  assert(prunedMsg !== undefined, "dedup replaces the older duplicate with a pruned placeholder")
-  assertEq(output.messages.length, input.messages.length, "dedup preserves message count (replaces, not removes)")
+  // The dedup hook should clear the older duplicate's output
+  const olderParts = output.messages[1].parts
+  const prunedTool = olderParts.find((p: any) => p.type === "tool" && p.state?.output === "[Duplicate tool output pruned]")
+  assert(prunedTool !== undefined, "dedup clears the older duplicate's tool output")
+  assertEq(output.messages.length, input.messages.length, "dedup preserves message count")
 }
 
 // Test: no duplicates = no change
 {
-  const input: HookInput & { messages: any[] } = {
+  const input = {
     messages: [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi", tool_calls: [{ id: "call_1", function: { name: "read", arguments: '{"file_path":"/a"}' } }] },
-      { role: "tool", content: "file a", tool_call_id: "call_1" },
+      wpUser("hello"),
+      wpAsst("hi", [completedTool("c1", "read", { file_path: "/a" }, "file a")]),
     ],
   }
-  const output: HookOutput & { messages: any[] } = { messages: [...input.messages] }
+  const output = { messages: structuredClone(input.messages) }
   await dedupHook(input, output)
-  assertEq(output.messages.length, 3, "dedup: no change when no duplicates")
+  assertEq(output.messages.length, 2, "dedup: no change when no duplicates")
 }
 
 // Test: three-way duplicate only prunes the oldest pair
 {
-  const input: HookInput & { messages: any[] } = {
+  const input = {
     messages: [
-      { role: "assistant", content: "first", tool_calls: [{ id: "c1", function: { name: "read", arguments: '{"file_path":"/x"}' } }] },
-      { role: "tool", content: "file x", tool_call_id: "c1" },
-      { role: "assistant", content: "second", tool_calls: [{ id: "c2", function: { name: "read", arguments: '{"file_path":"/x"}' } }] },
-      { role: "tool", content: "file x", tool_call_id: "c2" },
-      { role: "assistant", content: "third", tool_calls: [{ id: "c3", function: { name: "read", arguments: '{"file_path":"/x"}' } }] },
-      { role: "tool", content: "file x", tool_call_id: "c3" },
+      wpAsst("first", [completedTool("c1", "read", { file_path: "/x" }, "x1")]),
+      wpAsst("second", [completedTool("c2", "read", { file_path: "/x" }, "x2")]),
+      wpAsst("third", [completedTool("c3", "read", { file_path: "/x" }, "x3")]),
     ],
   }
-  const output: HookOutput & { messages: any[] } = { messages: [...input.messages] }
+  const output = { messages: structuredClone(input.messages) }
   await dedupHook(input, output)
-  const prunedCount = output.messages.filter(
-    (m: any) => typeof m.content === "string" && m.content.includes("Duplicate") && m.content.includes("pruned")
+  const prunedCount = output.messages.filter((m: any) =>
+    m.parts?.some((p: any) => p.type === "tool" && p.state?.output === "[Duplicate tool output pruned]")
   ).length
   assert(prunedCount >= 1, `dedup prunes duplicates from 3-way repeat (got ${prunedCount} pruned)`)
 }
@@ -102,49 +113,68 @@ section("Error Prune Hook")
 const { createErrorPruneHook } = await import("../src/hooks/error-prune")
 const errorHook = createErrorPruneHook(4)
 
-// Test: prunes errored tool inputs after threshold
-{
-  const now = Date.now()
-  const input: HookInput & { messages: any[] } = {
-    messages: [
-      { role: "user", content: "hello", timestamp: now - 100000 },
-      { role: "assistant", content: "trying", tool_calls: [{ id: "call_1", function: { name: "bash", arguments: '{"command":"bad"}' } }] },
-      { role: "tool", content: "Error: command failed", tool_call_id: "call_1", isError: true, timestamp: now - 90000 },
-      { role: "user", content: "try again", timestamp: now - 85000 },
-      { role: "assistant", content: "retry", tool_calls: [{ id: "call_2", function: { name: "bash", arguments: '{"command":"bad2"}' } }] },
-      { role: "tool", content: "Error: command failed again", tool_call_id: "call_2", isError: true, timestamp: now - 80000 },
-      { role: "user", content: "try again 2", timestamp: now - 75000 },
-      { role: "assistant", content: "trying again", tool_calls: [{ id: "call_3", function: { name: "bash", arguments: '{"command":"bad3"}' } }] },
-      { role: "tool", content: "Error: still failing", tool_call_id: "call_3", isError: true, timestamp: now - 70000 },
-      { role: "user", content: "try again 3", timestamp: now - 65000 },
-      { role: "assistant", content: "one more", tool_calls: [{ id: "call_4", function: { name: "bash", arguments: '{"command":"bad4"}' } }] },
-      { role: "tool", content: "Error: failed again", tool_call_id: "call_4", isError: true, timestamp: now - 60000 },
-      { role: "user", content: "try one more", timestamp: now - 55000 },
-      { role: "assistant", content: "should prune old errors now", tool_calls: [{ id: "call_5", function: { name: "bash", arguments: '{"command":"good"}' } }] },
-      { role: "tool", content: "success", tool_call_id: "call_5" },
-    ],
-  }
-  const output: HookOutput & { messages: any[] } = { messages: [...input.messages] }
-  await errorHook(input, output)
-  const prunedMsg = output.messages.find(
-    (m: any) => typeof m.content === "string" && m.content.includes("[Input content pruned after")
-  )
-  assert(prunedMsg !== undefined, "error-prune modifies content of errored messages past threshold")
+// Helper: minimal error tool part
+function errorTool(callID: string, tool: string, input: any, error: string): any {
+  return { type: "tool" as const, callID, tool, state: { status: "error" as const, input, error, time: { start: 0, end: 1 } } }
+}
+// Helper: minimal completed tool part (non-error)
+function okTool(callID: string, tool: string, input: any, output: string): any {
+  return { type: "tool" as const, callID, tool, state: { status: "completed" as const, input, output, title: tool, metadata: {}, time: { start: 0, end: 1 } } }
 }
 
-// Test: error-prune does NOT touch non-error messages
+// Test: prunes errored tool inputs after threshold
 {
-  const now = Date.now()
-  const input: HookInput & { messages: any[] } = {
+  const errorHook = createErrorPruneHook(2) // prune after 2 turns
+  const input = {
     messages: [
-      { role: "user", content: "hello", timestamp: now - 100000 },
-      { role: "assistant", content: "doing something", tool_calls: [{ id: "call_1", function: { name: "bash", arguments: '{"command":"good"}' } }] },
-      { role: "tool", content: "success", tool_call_id: "call_1", isError: false, timestamp: now - 90000 },
+      wpUser("hello"),                                                          // idx 0
+      wpAsst("trying", [errorTool("c1", "bash", { command: "bad" }, "Error: command failed")]),  // idx 1 — 3 turns ago → prune
+      wpUser("step 2"),                                                         // idx 2
+      wpAsst("retry", [errorTool("c2", "bash", { command: "bad2" }, "Error: failed again")]),    // idx 3 — 2 turns ago → prune
+      wpUser("step 3"),                                                         // idx 4
+      wpAsst("one more", [errorTool("c3", "bash", { command: "bad3" }, "Error: still failing")]), // idx 5 — 1 turn ago → no prune
+      wpUser("current"),                                                        // idx 6
+      wpAsst("done", [okTool("c4", "bash", { command: "good" }, "success")]),   // idx 7
     ],
   }
-  const output: HookOutput & { messages: any[] } = { messages: JSON.parse(JSON.stringify(input.messages)) }
+  const output = { messages: structuredClone(input.messages) }
   await errorHook(input, output)
-  assertDeepEq(output.messages, input.messages, "error-prune leaves non-error messages untouched")
+
+  // idx 1: should be pruned (input cleared, error message augmented)
+  const msg1 = output.messages[1]
+  const part1 = msg1.parts.find((p: any) => p.type === "tool")
+  assert(part1 !== undefined && typeof part1.state.input === "object" && Object.keys(part1.state.input).length === 0, "error-prune clears input on old errors")
+  assert(part1.state.error.includes("[Input content pruned after"), "error-prune adds note to error message")
+
+  // idx 3: should also be pruned
+  const msg3 = output.messages[3]
+  const part3 = msg3.parts.find((p: any) => p.type === "tool")
+  assert(part3 !== undefined && Object.keys(part3.state.input).length === 0, "error-prune clears input on 2nd old error")
+  assert(part3.state.error.includes("[Input content pruned after"), "error-prune adds note to 2nd error")
+
+  // idx 5: should NOT be pruned (only 1 turn ago < threshold 2)
+  const msg5 = output.messages[5]
+  const part5 = msg5.parts.find((p: any) => p.type === "tool")
+  assert(part5 !== undefined && Object.keys(part5.state.input).length > 0, "error-prune does NOT prune recent errors")
+}
+
+// Test: error-prune does NOT touch non-error messages (WithParts format)
+{
+  const errorHook = createErrorPruneHook(2)
+  const input = {
+    messages: [
+      wpUser("hello"),
+      wpAsst("working", [okTool("c1", "bash", { command: "good" }, "success")]),
+      wpUser("step 2"),
+      wpAsst("done", [okTool("c2", "bash", { command: "good2" }, "success2")]),
+    ],
+  }
+  const output = { messages: structuredClone(input.messages) }
+  await errorHook(input, output)
+  // Verify the completed tool parts still have their original input (not cleared)
+  const part1 = output.messages[1].parts.find((p: any) => p.type === "tool")
+  assert(part1 !== undefined && Object.keys(part1.state.input).length > 0, "error-prune does NOT touch completed tool inputs")
+  assertEq(part1.state.output, "success", "error-prune does NOT touch completed tool outputs")
 }
 
 // === Intent Gate Hook ===
@@ -675,13 +705,12 @@ section("Tool Discovery Hook")
 const { createToolDiscoveryHook } = await import("../src/hooks/tool-discovery")
 const discoveryHook = createToolDiscoveryHook()
 
-// Test: injects on new conversation
+// Test: disabled — flat message injection removed for MiMo-Code v0.1.7+ compat
 {
   const input = { messages: [{ role: "user", content: "hello" }] }
   const output = { messages: [{ role: "user", content: "hello" }] }
   await discoveryHook(input, output)
-  assert(output.messages[0].role === "system", "tool-discovery injects system message")
-  assert(output.messages[0].content.includes("Powerpack Tools Available"), "tool-discovery has tool list")
+  assert(output.messages.length === 1 && output.messages[0].role === "user", "tool-discovery is no-op (disabled)")
 }
 
 // Test: does not inject on existing conversation

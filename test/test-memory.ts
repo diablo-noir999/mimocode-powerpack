@@ -5,7 +5,7 @@
 
 import { MemoryStore, computeNormalizedHash } from "../src/memory/store"
 import { captureMemory, captureFromSession } from "../src/memory/hooks"
-import { searchFTS, searchTFIDF, sanitizeFtsQuery } from "../src/memory/search"
+import { searchFTS, searchTFIDF, sanitizeFtsQuery, applyFeedbackWeight } from "../src/memory/search"
 import { tier, shouldArchive, computeBudgetPressure, TIER_COST } from "../src/memory/decay"
 import { rowToMemory } from "../src/memory/memory-utils"
 import { isRecord, getToolName, getToolInput } from "../src/memory/message-utils"
@@ -564,6 +564,173 @@ section("MemoryStore: getByHashBatch")
   assert(existing.includes(hash1), "getByHashBatch includes hash1")
   assert(existing.includes(hash2), "getByHashBatch includes hash2")
   assert(!existing.includes(hash3), "getByHashBatch excludes non-existent hash")
+}
+
+section("Typed Memory Payloads")
+{
+  const payloadStore = new MemoryStore(`${TEST_DB_DIR}/payload-test.db`)
+
+  // QA payload
+  const qaMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "LESSONS_LEARNED",
+    content: "Q: How do we handle auth? A: JWT tokens with refresh rotation",
+    payloadType: "qa",
+    payload: { type: "qa", question: "How do we handle auth?", answer: "JWT tokens with refresh rotation", context: "API middleware", feedbackScore: 0.8 },
+  })
+  assertEq(qaMem.payloadType, "qa", "QA payload type stored correctly")
+  assert(qaMem.payload !== null, "QA payload parsed correctly")
+  assertEq((qaMem.payload as any).question, "How do we handle auth?", "QA payload question preserved")
+  assertEq((qaMem.payload as any).feedbackScore, 0.8, "QA payload feedbackScore preserved")
+
+  // Trace payload
+  const traceMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "BUG_FIXES",
+    content: "Token validation failed in middleware/auth.ts",
+    payloadType: "trace",
+    payload: { type: "trace", originFunction: "validateToken", status: "error", errorMessage: "Token expired" },
+  })
+  assertEq(traceMem.payloadType, "trace", "Trace payload type stored correctly")
+  assertEq((traceMem.payload as any).status, "error", "Trace payload status preserved")
+  assertEq((traceMem.payload as any).errorMessage, "Token expired", "Trace payload errorMessage preserved")
+
+  // Feedback payload
+  const feedbackMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "USER_PREFERENCES",
+    content: "User prefers dark theme for IDE",
+    payloadType: "feedback",
+    payload: { type: "feedback", targetId: qaMem.id, score: 0.9, text: "Very helpful!" },
+  })
+  assertEq(feedbackMem.payloadType, "feedback", "Feedback payload type stored correctly")
+  assertEq((feedbackMem.payload as any).score, 0.9, "Feedback payload score preserved")
+  assertEq((feedbackMem.payload as any).targetId, qaMem.id, "Feedback payload targetId preserved")
+
+  // Skill run payload
+  const skillMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "ARCHITECTURE",
+    content: "Ran the verify skill on the auth module",
+    payloadType: "skill_run",
+    payload: { type: "skill_run", skillName: "verify", taskText: "Check auth module", resultSummary: "All checks passed", successScore: 1.0, latencyMs: 1500 },
+  })
+  assertEq(skillMem.payloadType, "skill_run", "Skill run payload type stored correctly")
+  assertEq((skillMem.payload as any).skillName, "verify", "Skill run payload skillName preserved")
+  assertEq((skillMem.payload as any).latencyMs, 1500, "Skill run payload latencyMs preserved")
+
+  // Retrieve and verify payload survives round-trip
+  const retrieved = payloadStore.getById(qaMem.id)
+  assert(retrieved !== null, "getById returns memory with payload")
+  assertEq(retrieved!.payloadType, "qa", "getById preserves payloadType")
+  assert((retrieved!.payload as any).question === "How do we handle auth?", "getById preserves payload content")
+
+  // Memory without payload
+  const plainMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "CONFIG_VALUES",
+    content: "Standard memory without typed payload",
+  })
+  assertEq(plainMem.payloadType, null, "Plain memory has null payloadType")
+  assertEq(plainMem.payload, null, "Plain memory has null payload")
+
+  // Insert without payload fields works (backward compatible)
+  const legacyMem = payloadStore.insert({
+    projectPath: "/test/payload",
+    category: "CONSTRAINTS",
+    content: "Legacy memory inserted without payload fields",
+  })
+  assertEq(legacyMem.payloadType, null, "Legacy insert has null payloadType")
+}
+
+section("Feedback-Weighted Retrieval")
+{
+  // applyFeedbackWeight boosts positive feedback, reduces negative
+  const positiveResult: SearchResult = {
+    memory: {
+      id: 1, projectPath: "/test", category: "LESSONS_LEARNED", content: "Positive memory",
+      normalizedHash: "abc", importance: 50, scope: "project", sourceSessionId: null,
+      sourceType: "manual", seenCount: 1, retrievalCount: 0, createdAt: 0, updatedAt: 0,
+      lastSeenAt: 0, lastRetrievedAt: null, status: "active", expiresAt: null,
+      payloadType: "feedback",
+      payload: { type: "feedback", targetId: 1, score: 1.0 },
+    },
+    score: 1.0,
+    matchType: "fts",
+  }
+  const weighted = applyFeedbackWeight([positiveResult])
+  assert(weighted[0].score > 1.0, `Positive feedback boosts score (got ${weighted[0].score})`)
+
+  const negativeResult: SearchResult = {
+    memory: {
+      id: 2, projectPath: "/test", category: "LESSONS_LEARNED", content: "Negative memory",
+      normalizedHash: "def", importance: 50, scope: "project", sourceSessionId: null,
+      sourceType: "manual", seenCount: 1, retrievalCount: 0, createdAt: 0, updatedAt: 0,
+      lastSeenAt: 0, lastRetrievedAt: null, status: "active", expiresAt: null,
+      payloadType: "feedback",
+      payload: { type: "feedback", targetId: 2, score: -1.0 },
+    },
+    score: 1.0,
+    matchType: "fts",
+  }
+  const weightedNeg = applyFeedbackWeight([negativeResult])
+  assert(weightedNeg[0].score < 1.0, `Negative feedback reduces score (got ${weightedNeg[0].score})`)
+
+  const plainResult: SearchResult = {
+    memory: {
+      id: 3, projectPath: "/test", category: "CONFIG_VALUES", content: "Plain memory",
+      normalizedHash: "ghi", importance: 50, scope: "project", sourceSessionId: null,
+      sourceType: "manual", seenCount: 1, retrievalCount: 0, createdAt: 0, updatedAt: 0,
+      lastSeenAt: 0, lastRetrievedAt: null, status: "active", expiresAt: null,
+      payloadType: null,
+      payload: null,
+    },
+    score: 1.0,
+    matchType: "fts",
+  }
+  const weightedPlain = applyFeedbackWeight([plainResult])
+  assertEq(weightedPlain[0].score, 1.0, "No feedback = no score change")
+}
+
+section("memory-utils: rowToMemory with payload")
+{
+  const row = {
+    id: 50,
+    project_path: "/test/payload-row",
+    category: "LESSONS_LEARNED",
+    content: "Test row with payload",
+    normalized_hash: "pay123",
+    importance: 70,
+    scope: "project",
+    source_session_id: null,
+    source_type: "manual",
+    seen_count: 1,
+    retrieval_count: 0,
+    created_at: 3000000,
+    updated_at: 4000000,
+    last_seen_at: 3500000,
+    last_retrieved_at: null,
+    status: "active",
+    expires_at: null,
+    payload_type: "qa",
+    payload: JSON.stringify({ type: "qa", question: "Test?", answer: "Yes" }),
+  }
+  const mem = rowToMemory(row)
+  assertEq(mem.payloadType, "qa", "rowToMemory maps payload_type")
+  assert(mem.payload !== null, "rowToMemory parses payload JSON")
+  assertEq((mem.payload as any).question, "Test?", "rowToMemory parses payload content")
+
+  // Null payload fields
+  const rowNull = { ...row, payload_type: null, payload: null }
+  const memNull = rowToMemory(rowNull)
+  assertEq(memNull.payloadType, null, "rowToMemory handles null payload_type")
+  assertEq(memNull.payload, null, "rowToMemory handles null payload")
+
+  // Invalid JSON payload
+  const rowBad = { ...row, payload_type: "qa", payload: "not-json" }
+  const memBad = rowToMemory(rowBad)
+  assertEq(memBad.payloadType, null, "rowToMemory handles invalid payload JSON gracefully")
+  assertEq(memBad.payload, null, "rowToMemory returns null for invalid payload JSON")
 }
 
 // Cleanup

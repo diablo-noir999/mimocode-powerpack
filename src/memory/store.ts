@@ -15,6 +15,8 @@ import {
   type MemoryScope,
   type MemorySourceType,
   type MemoryStatus,
+  type MemoryPayload,
+  type PayloadType,
   CATEGORY_DEFAULT_TTL,
   MEMORY_CATEGORY_ORDER_SQL,
 } from "./types";
@@ -22,6 +24,7 @@ import { tier, shouldArchive, computeBudgetPressure } from "./decay";
 import { VectorStore } from "./vector-store";
 import { embed, DEFAULT_EMBEDDING_MODEL } from "./embeddings";
 import { rowToMemory } from "./memory-utils";
+import { KnowledgeGraph } from "./knowledge-graph";
 
 // === Row Interfaces ===
 
@@ -44,6 +47,8 @@ export interface MemoryRow {
   status: string;
   normalized_hash: string;
   expires_at: number | null;
+  payload_type: string | null;
+  payload: string | null;
 }
 
 // === Normalized hash (from magic-context normalize-hash.ts) ===
@@ -78,7 +83,9 @@ CREATE TABLE IF NOT EXISTS memories (
   last_seen_at INTEGER NOT NULL,
   last_retrieved_at INTEGER,
   status TEXT NOT NULL DEFAULT 'active',
-  expires_at INTEGER
+  expires_at INTEGER,
+  payload_type TEXT,
+  payload TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_path);
@@ -125,6 +132,7 @@ export class MemoryStore {
   private stmtCount: any;
   private stmtGetAll: any;
   private _vectorStore: VectorStore | null = null;
+  private _knowledgeGraph: KnowledgeGraph | null = null;
 
 
 
@@ -138,8 +146,8 @@ export class MemoryStore {
 
     // Prepare statements
     this.stmtInsert = this.db.prepare(
-      `INSERT INTO memories (project_path, category, content, normalized_hash, importance, scope, source_session_id, source_type, seen_count, retrieval_count, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memories (project_path, category, content, normalized_hash, importance, scope, source_session_id, source_type, seen_count, retrieval_count, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, payload_type, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.stmtGetById = this.db.prepare("SELECT * FROM memories WHERE id = ?");
     this.stmtGetByHash = this.db.prepare(
@@ -171,6 +179,8 @@ export class MemoryStore {
     const hash = computeNormalizedHash(input.content);
     const ttl = CATEGORY_DEFAULT_TTL[input.category] ?? null;
     const expiresAt = input.expiresAt ?? (ttl ? now + ttl : null);
+    const payloadType = input.payloadType ?? null;
+    const payloadJson = input.payload ? JSON.stringify(input.payload) : null;
 
     const result = this.stmtInsert.run(
       input.projectPath,
@@ -189,6 +199,8 @@ export class MemoryStore {
       null,
       "active",
       expiresAt,
+      payloadType,
+      payloadJson,
     );
 
     const memory = this.getById(Number(result.lastInsertRowid));
@@ -294,7 +306,7 @@ export class MemoryStore {
         const hash = computeNormalizedHash(entry.content);
         const ttl = CATEGORY_DEFAULT_TTL[entry.category] ?? null;
         const expiresAt = ttl ? now + ttl : null;
-        this.stmtInsert.run(projectPath, entry.category, entry.content, hash, 50, 'project', sessionId, 'session_promote', 1, 0, now, now, now, null, 'active', expiresAt);
+        this.stmtInsert.run(projectPath, entry.category, entry.content, hash, 50, 'project', sessionId, 'session_promote', 1, 0, now, now, now, null, 'active', expiresAt, null, null);
         count++;
       }
     });
@@ -336,6 +348,15 @@ export class MemoryStore {
     return this._vectorStore;
   }
 
+  // === Knowledge Graph ===
+
+  getKnowledgeGraph(): KnowledgeGraph {
+    if (!this._knowledgeGraph) {
+      this._knowledgeGraph = new KnowledgeGraph(this.db);
+    }
+    return this._knowledgeGraph;
+  }
+
   /** Expose raw db for vector store access from search module */
   getDb(): Database {
     return this.db;
@@ -369,6 +390,10 @@ export function getMemoryStore(dbPath: string): MemoryStore {
     _instances.set(dbPath, instance);
   }
   return instance;
+}
+
+export function getKnowledgeGraph(dbPath: string): KnowledgeGraph {
+  return getMemoryStore(dbPath).getKnowledgeGraph();
 }
 
 // SECURITY: Close all singleton stores on process exit to prevent data corruption.

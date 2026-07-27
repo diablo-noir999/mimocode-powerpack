@@ -2,8 +2,11 @@
  * Quality Gate Hook
  *
  * When the agent is about to idle with uncommitted changes, run a
- * configurable validation pipeline. Inspired by ECC's post-edit quality
- * gate and no-mistakes' validation pipeline concept.
+ * configurable validation pipeline. Injects a message when failures
+ * are detected.
+ *
+ * Note: session.idle is deprecated in MiMo-Code v0.1.7+ (bus event).
+ * This hook may not fire in all versions.
  */
 
 import { execFile } from "child_process"
@@ -14,16 +17,24 @@ const DEFAULT_COMMANDS = [
   { name: "test", cmd: "bun test", timeout: 60000 },
 ]
 
+/** Check whether an object looks like a flat { role, content } message */
+function isFlatMessage(obj: unknown): boolean {
+  return typeof obj === "object" && obj !== null && "role" in obj && !("info" in obj)
+}
+
+/** Check whether an object looks like a WithParts { info, parts } message */
+function isWithPartsMessage(obj: unknown): boolean {
+  return typeof obj === "object" && obj !== null && "info" in obj && "parts" in obj
+}
+
 export function createQualityGateHook(config?: { commands?: Array<{ name: string; cmd: string; timeout?: number }> }) {
   const commands = config?.commands ?? DEFAULT_COMMANDS
 
   return async (input: any, output: any) => {
-    // Only trigger on session.idle
     if (!input?.directory) return
 
     const dir = input.directory
 
-    // Check if there are uncommitted changes (async to avoid blocking event loop)
     try {
       const status = await new Promise<string>((resolve, reject) => {
         execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: GIT_STATUS_TIMEOUT_MS }, (err, stdout) => {
@@ -31,39 +42,57 @@ export function createQualityGateHook(config?: { commands?: Array<{ name: string
           else resolve(stdout.toString().trim())
         })
       })
-      if (!status) return // No changes, nothing to validate
+      if (!status) return
     } catch {
-      return // Not a git repo or git not available
+      return
     }
 
     const runCommand = async ({ name, cmd, timeout }: { name: string; cmd: string; timeout?: number }): Promise<string> => {
       if (/[;&|`$(){}!<>]/.test(cmd)) {
-        return `⚠️ ${name}: SKIPPED (unsafe command)`;
+        return `⚠️ ${name}: SKIPPED (unsafe command)`
       }
-      const parts = cmd.split(/\s+/).filter(Boolean);
+      const parts = cmd.split(/\s+/).filter(Boolean)
       return new Promise<string>((resolve) => {
         execFile(parts[0], parts.slice(1), { cwd: dir, timeout }, (err, _stdout, stderr) => {
           if (err) {
-            const lastLines = (stderr?.toString() || "").split("\n").slice(-10).join("\n");
-            resolve(`❌ ${name}: FAIL` + (lastLines ? `\n   ${lastLines}` : ""));
+            const lastLines = (stderr?.toString() || "").split("\n").slice(-10).join("\n")
+            resolve(`❌ ${name}: FAIL` + (lastLines ? `\n   ${lastLines}` : ""))
           } else {
-            resolve(`✅ ${name}: PASS`);
+            resolve(`✅ ${name}: PASS`)
           }
-        });
-      });
-    };
-
-    const results = await Promise.all(commands.map(runCommand));
-    const allPassed = results.every(r => r.startsWith("✅") || r.startsWith("⚠️"));
-
-    if (!allPassed) {
-      // Inject a message suggesting the agent fix the issues
-      const summary = results.join("\n")
-      output.messages = output.messages || []
-      output.messages.push({
-        role: "system",
-        content: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.`,
+        })
       })
+    }
+
+    const results = await Promise.all(commands.map(runCommand))
+    const allPassed = results.every(r => r.startsWith("✅") || r.startsWith("⚠️"))
+
+    if (allPassed) return
+    if (!output) return
+
+    const summary = results.join("\n")
+
+    // Push a message in the format matching existing messages (or skip if unknown)
+    if (Array.isArray(output.messages)) {
+      if (output.messages.length === 0 || isFlatMessage(output.messages[0])) {
+        output.messages.push({
+          role: "system",
+          content: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.`,
+        })
+      } else if (isWithPartsMessage(output.messages[0])) {
+        // WithParts format — push a user message with the gate results
+        output.messages.push({
+          info: {
+            role: "user",
+            id: `quality-gate-${Date.now()}`,
+            sessionID: input.sessionID ?? "",
+            time: { created: Date.now() },
+            agent: "powerpack",
+            model: {},
+          },
+          parts: [{ type: "text", text: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.` }],
+        })
+      }
     }
   }
 }

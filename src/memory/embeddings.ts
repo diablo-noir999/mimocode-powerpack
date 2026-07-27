@@ -6,11 +6,14 @@
  * Lazy model download on first use; cached under .mimocode/models/.
  */
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export const DEFAULT_EMBEDDING_MODEL = "onnx-community/granite-embedding-small-english-r2-ONNX";
 export const EMBEDDING_DIMENSIONS = 384;
+
+// Old models to purge on init — these are from previous plugin versions
+const STALE_MODEL_PREFIXES = ["Xenova/", "BAAI/", "ibm-granite/"];
 
 type EmbeddingPipeline = {
   (
@@ -43,6 +46,23 @@ function isNativeRuntimeMissingError(error: unknown): boolean {
     lower.includes("cannot find module") ||
     lower.includes("err_module_not_found")
   );
+}
+
+function cleanupStaleModels(modelCacheDir: string) {
+  try {
+    const entries = readdirSync(modelCacheDir);
+    for (const entry of entries) {
+      if (STALE_MODEL_PREFIXES.some(prefix => entry.startsWith(prefix))) {
+        const dirPath = join(modelCacheDir, entry);
+        if (statSync(dirPath).isDirectory()) {
+          rmSync(dirPath, { recursive: true, force: true });
+          console.debug(`[powerpack] Cleaned stale model cache: ${entry}`);
+        }
+      }
+    }
+  } catch {
+    // non-fatal — cache dir may not exist yet
+  }
 }
 
 function toFloat32Array(values: ArrayLike<number>): Float32Array {
@@ -78,6 +98,7 @@ async function initPipeline(model: string, modelCacheDir: string): Promise<boole
   initPromise = (async () => {
     try {
       mkdirSync(modelCacheDir, { recursive: true });
+      cleanupStaleModels(modelCacheDir);
 
       // Non-literal import to prevent Bun static analysis
       const transformersSpec = `@huggingface/${"transformers"}`;
@@ -87,15 +108,37 @@ async function initPipeline(model: string, modelCacheDir: string): Promise<boole
       if (LogLevel && "ERROR" in LogLevel) {
         env.logLevel = LogLevel.ERROR;
       }
+      // Save the original cache dir so we don't pollute global state for
+      // other @huggingface/transformers users in the same process (e.g.
+      // MiMoCode's own embedding code which may use Xenova/all-MiniLM-L6-v2).
+      // Without this restore, those callers would download into our project
+      // .mimocode/models/ dir and recreate stale model dirs we just cleaned.
+      const originalCacheDir = env.cacheDir;
       env.cacheDir = modelCacheDir;
 
-      const createPipeline = mod.pipeline as CreateEmbeddingPipeline;
-      const loaded = await createPipeline("feature-extraction", model, { dtype: "fp32" });
-      pipeline = loaded;
-      return true;
+      try {
+        const createPipeline = mod.pipeline as CreateEmbeddingPipeline;
+        const loaded = await createPipeline(
+          "feature-extraction",
+          model,
+          { dtype: "fp32", cache_dir: modelCacheDir } as Parameters<typeof createPipeline>[2] & { cache_dir?: string },
+        );
+        pipeline = loaded;
+        console.log(`[powerpack] Embeddings initialized with model ${model}`);
+        return true;
+      } finally {
+        env.cacheDir = originalCacheDir;
+        // Run cleanup again AFTER pipeline creation — other @huggingface/transformers
+        // users in the same process (e.g. MiMoCode's Xenova embeddings) may have
+        // downloaded stale models into our cache dir while env.cacheDir was set to it.
+        cleanupStaleModels(modelCacheDir);
+      }
     } catch (error) {
       if (isNativeRuntimeMissingError(error)) {
         nativeRuntimeMissing = true;
+        console.error("[powerpack] ONNX runtime not found. Embeddings disabled. Install onnxruntime-node: bun add onnxruntime-node");
+      } else {
+        console.error("[powerpack] Embedding init failed:", error instanceof Error ? error.message : String(error));
       }
       pipeline = null;
       return false;
@@ -115,6 +158,8 @@ async function initPipeline(model: string, modelCacheDir: string): Promise<boole
 export async function initEmbeddings(model?: string, cacheDir?: string): Promise<boolean> {
   const m = model || DEFAULT_EMBEDDING_MODEL;
   const dir = cacheDir || join(process.cwd(), ".mimocode", "models");
+  // Clean before init too — covers the case where stale models appear between sessions
+  cleanupStaleModels(dir);
   return initPipeline(m, dir);
 }
 
@@ -124,13 +169,17 @@ export async function initEmbeddings(model?: string, cacheDir?: string): Promise
 export async function embed(text: string, model?: string): Promise<Float32Array | null> {
   const m = model || DEFAULT_EMBEDDING_MODEL;
   const dir = join(process.cwd(), ".mimocode", "models");
+  // Clean stale models before every embed call — other code in the same process
+  // (e.g. MiMoCode's own Xenova embeddings) may re-download them after our init cleanup.
+  cleanupStaleModels(dir);
   if (!(await initPipeline(m, dir))) return null;
   if (!pipeline) return null;
 
   try {
     const result = await pipeline(text, { pooling: "mean", normalize: true });
     return extractEmbedding(result);
-  } catch {
+  } catch (error) {
+    console.error("[powerpack] Embed failed:", error instanceof Error ? error.message : String(error));
     return null;
   }
 }
@@ -145,6 +194,7 @@ export async function embedBatch(
   if (texts.length === 0) return [];
   const m = model || DEFAULT_EMBEDDING_MODEL;
   const dir = join(process.cwd(), ".mimocode", "models");
+  cleanupStaleModels(dir);
   if (!(await initPipeline(m, dir))) return Array.from({ length: texts.length }, () => null);
   if (!pipeline) return Array.from({ length: texts.length }, () => null);
 
@@ -179,7 +229,8 @@ export async function embedBatch(
       results.push(await embed(text, model));
     }
     return results;
-  } catch {
+  } catch (error) {
+    console.error("[powerpack] Batch embed failed:", error instanceof Error ? error.message : String(error));
     return Array.from({ length: texts.length }, () => null);
   }
 }

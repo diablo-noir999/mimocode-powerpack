@@ -32,6 +32,7 @@ import {
 } from "../memory/session-facts"
 import { getMemoryDbPath } from "../memory/types"
 import { MIN_TOOL_OUTPUT_AGE } from "../constants"
+import { readBrainContext } from "../memory/brain-loader"
 
 // === Config ===
 
@@ -48,6 +49,10 @@ export interface TransformPipelineConfig {
   maxDropAge: number
   /** Custom drop strategy config overrides */
   dropConfig?: Partial<DropStrategyConfig>
+  /** Enable brain context loader — injects wiki/index.md on first message */
+  brainLoader?: boolean
+  /** Max tokens for injected brain context (default: 8000) */
+  brainLoaderMaxTokens?: number
 }
 
 export const DEFAULT_TRANSFORM_CONFIG: TransformPipelineConfig = {
@@ -56,6 +61,8 @@ export const DEFAULT_TRANSFORM_CONFIG: TransformPipelineConfig = {
   cacheLayout: true,
   sessionFacts: true,
   maxDropAge: 50,
+  brainLoader: true,
+  brainLoaderMaxTokens: 8000,
 }
 
 // === Pipeline Stages ===
@@ -73,6 +80,8 @@ interface PipelineContext {
     cacheBoundary: number
     originalCount: number
     finalCount: number
+    brainInjected: boolean
+    brainTokenEstimate: number
   }
 }
 
@@ -136,6 +145,17 @@ function runCacheLayout(ctx: PipelineContext): void {
   ctx.stats.cacheBoundary = findCacheBoundary(ctx.messages)
 }
 
+/**
+ * Stage 4: Brain Context Loader — inject wiki/index.md context on first message.
+ * DISABLED in v0.1.7+: Flat { role, content } messages crash MiMoCode's runtime
+ * which expects { info: Message; parts: Part[] } format.
+ */
+function runBrainLoader(ctx: PipelineContext): void {
+  // DISABLED: Flat message injection is incompatible with MiMo-Code v0.1.7+.
+  // Brain context should be delivered via the native memory system instead.
+  void ctx
+}
+
 // === Main Pipeline ===
 
 /**
@@ -157,6 +177,8 @@ export function runTransformPipeline(
       cacheBoundary: 0,
       originalCount: messages.length,
       finalCount: messages.length,
+      brainInjected: false,
+      brainTokenEstimate: 0,
     }
   }
 
@@ -173,14 +195,17 @@ export function runTransformPipeline(
       cacheBoundary: 0,
       originalCount: messages.length,
       finalCount: messages.length,
+      brainInjected: false,
+      brainTokenEstimate: 0,
     },
   }
 
   // Run stages in order: facts first (on original messages), then drops,
-  // then cache layout (classification only).
+  // then cache layout (classification only), then brain loader (first message only).
   runSessionFactsExtraction(ctx)
   runSmartDrops(ctx)
   runCacheLayout(ctx)
+  runBrainLoader(ctx)
 
   ctx.stats.finalCount = messages.length
   return ctx.stats
@@ -233,5 +258,6 @@ export function summarizePipelineStats(stats: PipelineContext["stats"]): string 
     `stability=${(stats.cacheStabilityScore * 100).toFixed(0)}%`,
     `boundary=${stats.cacheBoundary}`,
     `messages=${stats.originalCount}→${stats.finalCount}`,
-  ].join(" ")
+    stats.brainInjected ? `brain=${stats.brainTokenEstimate}tok` : null,
+  ].filter(Boolean).join(" ")
 }

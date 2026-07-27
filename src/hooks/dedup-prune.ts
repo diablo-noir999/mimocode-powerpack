@@ -1,60 +1,57 @@
 /**
  * Tool Call Deduplication Hook
  *
- * Detects repeated identical tool calls (same tool name + same arguments)
- * and keeps only the most recent output. Older duplicates are replaced with
- * a placeholder to save tokens.
+ * Scans assistant messages for ToolPart objects and removes duplicate
+ * tool calls (same tool name + same arguments). Older duplicates have
+ * their input/output cleared to save tokens while preserving structure.
  *
  * Source: Adapted from dev/opencode-dynamic-context-pruning/src/strategies/deduplication.ts
+ * Rewritten for MiMo-Code v0.1.7+ WithParts { info, parts } format.
  */
 
 import type { HookInput, HookOutput } from "../types"
 
 export function createDedupPruneHook() {
   return async (input: HookInput, output: HookOutput) => {
-    if (!output?.messages || !Array.isArray(output.messages)) return
+    if (!output?.messages?.length) return
 
     const messages = output.messages
-    const seen = new Map<string, number>() // hash -> last seen index
-    const toPrune = new Set<number>()
+    // hash -> latest { msgIdx, partIdx }
+    const seen = new Map<string, { msgIdx: number; partIdx: number }>()
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i]
+      if (msg.info?.role !== "assistant") continue
+      if (!Array.isArray(msg.parts)) continue
 
-      // Only process tool result messages
-      if (msg.role !== "tool") continue
+      for (let j = 0; j < msg.parts.length; j++) {
+        const part = msg.parts[j]
+        if (part?.type !== "tool") continue
 
-      // Build a hash key from tool name + arguments (NOT tool_call_id, which is unique)
-      const toolName = msg.name ?? msg.tool ?? ""
-      const args = JSON.stringify(msg.arguments ?? msg.input ?? msg.args ?? msg.parameters ?? {})
-      // FNV-1a hash for fast dedup (SHA-256 is overkill for hot path)
-      const key = `${toolName}:${args}`
-      let hashVal = 0x811c9dc5
-      for (let j = 0; j < key.length; j++) {
-        hashVal ^= key.charCodeAt(j)
-        hashVal = (hashVal * 0x01000193) | 0
-      }
-      const hash = (hashVal >>> 0).toString(36)
+        // FNV-1a hash from tool name + serialized input
+        const key = `${part.tool}:${JSON.stringify(part.state?.input ?? {})}`
+        let hashVal = 0x811c9dc5
+        for (let k = 0; k < key.length; k++) {
+          hashVal ^= key.charCodeAt(k)
+          hashVal = (hashVal * 0x01000193) | 0
+        }
+        const hash = (hashVal >>> 0).toString(36)
 
-      if (seen.has(hash)) {
-        // Duplicate found — mark the OLDER one for pruning
-        const olderIndex = seen.get(hash)!
-        toPrune.add(olderIndex)
-        // Update to point to the newer one
-        seen.set(hash, i)
-      } else {
-        seen.set(hash, i)
-      }
-    }
-
-    // Replace pruned messages with placeholders
-    if (toPrune.size > 0) {
-      for (const idx of toPrune) {
-        const msg = messages[idx]
-        const toolName = msg.name ?? msg.tool ?? "tool"
-        messages[idx] = {
-          ...msg,
-          content: `[Duplicate ${toolName} output pruned — same call exists later in conversation]`,
+        if (seen.has(hash)) {
+          // Duplicate — clear the OLDER one's payload
+          const older = seen.get(hash)!
+          const olderMsg = messages[older.msgIdx]
+          if (olderMsg && olderMsg.parts[older.partIdx]) {
+            const olderPart = olderMsg.parts[older.partIdx]
+            if (olderPart.state?.status === "completed") {
+              olderPart.state.input = {}
+              olderPart.state.output = "[Duplicate tool output pruned]"
+            }
+          }
+          // Track the newer occurrence
+          seen.set(hash, { msgIdx: i, partIdx: j })
+        } else {
+          seen.set(hash, { msgIdx: i, partIdx: j })
         }
       }
     }
