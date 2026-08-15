@@ -11,7 +11,6 @@
 import { resolve as pathResolve, normalize } from "node:path"
 import { realpathSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import type { HookInput, HookOutput } from "../types"
 
 // ─── Shell Tokenizer ────────────────────────────────────────────────────────────
 
@@ -101,8 +100,8 @@ function gitSubcmd(tokens: readonly string[]): { sub: string | null; rest: strin
   while (i < tokens.length) {
     const t = tokens[i]; if (!t) break
     if (t === "--") { const n = tokens[i + 1]; return n && !n.startsWith("-") ? { sub: n, rest: tokens.slice(i + 2) } : { sub: null, rest: tokens.slice(i + 1) } }
-    t.startsWith("-") ? i++ : (() => { return { sub: t, rest: tokens.slice(i + 1) } })()
-    break
+    if (t.startsWith("-")) { i++; continue }
+    return { sub: t, rest: tokens.slice(i + 1) }
   }
   return { sub: null, rest: [] }
 }
@@ -362,14 +361,19 @@ function stripCmdW(tokens: string[]): string[] {
 // ─── Hook Entry Point ───────────────────────────────────────────────────────────
 
 export function createSafetyNetHook() {
-  return async (input: HookInput, output: HookOutput) => {
+  return async (input: any, output: any) => {
     if (input.tool !== "bash") return
-    const args = (output as any)?.args
+    const args = output?.args
     const command = args?.command
     if (typeof command !== "string" || !command.trim()) return
     const cwd = input.directory ?? process.cwd()
     const result = analyzeCommand(command, cwd)
     if (result) {
+      // tool.execute.before output contract: { args, cancel?, cancelReason? }.
+      // Setting cancel=true is what actually stops the tool call; content is
+      // informational only.
+      output.cancel = true
+      output.cancelReason = result.reason
       output.content = (output.content ? output.content + "\n" : "") + `[Safety Net] Blocked: ${result.reason}\nSegment: ${result.segment}`
       output.modified = true
     }

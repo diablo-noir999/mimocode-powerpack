@@ -1,7 +1,7 @@
 {
   "name": "mimocode-powerpack",
   "version": "1.0.0",
-  "description": "A comprehensive plugin bundle for MiMoCode — context management, memory, notifications, quota tracking, pixel art visualizer, code review, team coordination, autonomous loops, skill management, OpenCode plugin compatibility, Kimaki Discord integration, and 19 generic subagents.",
+  "description": "A comprehensive plugin bundle for MiMoCode — persistent memory with semantic search, context management, agent-behavior hooks, notifications, compression, skills, and 7 specialized subagents.",
   "type": "module",
   "main": "dist/server.js",
   "exports": {
@@ -44,13 +44,8 @@
     "memory",
     "search",
     "notifications",
-    "quota",
-    "visualizer",
     "agents",
-    "code-review",
-    "team",
     "skills",
-    "opencode-compat",
-    "kimaki"
+    "hooks"
   ]
 }

@@ -1,32 +1,18 @@
 /**
  * mimocode-powerpack — TUI Plugin Entry
  *
- * Provides TUI extensions: quota sidebar panel.
+ * Provides TUI extensions: skill management commands.
  */
 
 interface PowerpackTuiOptions {
-  quota?: { enabled?: boolean }
   skills?: { enabled?: boolean }
-  review?: { enabled?: boolean; port?: number }
 }
 
 const PowerpackTuiPlugin = async (api: any, options: any) => {
   const config = {
-    quota: { enabled: true },
     skills: { enabled: true },
-    review: { enabled: false, port: 5174 },
     ...((options as { powerpack?: PowerpackTuiOptions })?.powerpack ?? {}),
-  } as { quota: { enabled: boolean }; skills: { enabled: boolean }; review: { enabled: boolean; port: number } }
-
-  // Register quota sidebar panel if enabled
-  if (config.quota.enabled) {
-    api.command?.("powerpack-quota", {
-      description: "Show quota status",
-      handler: async () => {
-        return { content: "Quota status: checking..." }
-      },
-    })
-  }
+  } as { skills: { enabled: boolean } }
 
   // Register skills commands
   if (config.skills.enabled) {
@@ -78,34 +64,6 @@ const PowerpackTuiPlugin = async (api: any, options: any) => {
         } catch (error) {
           return { content: `Error: ${error instanceof Error ? error.message : String(error)}` }
         }
-      },
-    })
-  }
-
-  // Register review commands
-  if (config.review.enabled) {
-    api.command?.("review", {
-      description: "Start a code review session (opens browser)",
-      handler: async (args: string) => {
-        const ref = args?.trim() || undefined
-        const port = config.review.port
-        return {
-          content: `Starting code review...${ref ? ` (diff against ${ref})` : ""}`,
-        }
-      },
-    })
-
-    api.command?.("review-annotate", {
-      description: "Add annotation to current code review",
-      handler: async (args: string) => {
-        return { content: "Use the review_annotate tool to add comments to the current review." }
-      },
-    })
-
-    api.command?.("review-approve", {
-      description: "Approve or deny the current code review",
-      handler: async (args: string) => {
-        return { content: "Use the review_approve tool to approve or deny the current review." }
       },
     })
   }

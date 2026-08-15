@@ -1,8 +1,7 @@
 /**
  * Test: Hooks + Utility Modules
- * Covers: dedup-prune, error-prune, intent-gate, comment-checker, rules-injector,
- *         model-fallback, transform-pipeline, notify,
- *         todo-enforcer, memory-utils, message-utils, team/utils
+ * Covers: dedup-prune, error-prune, comment-checker, transform-pipeline, notify,
+ *         todo-enforcer, memory-utils, message-utils, tool-discovery
  * Run: bun run test/test-hooks.ts
  */
 
@@ -177,36 +176,6 @@ function okTool(callID: string, tool: string, input: any, output: string): any {
   assertEq(part1.state.output, "success", "error-prune does NOT touch completed tool outputs")
 }
 
-// === Intent Gate Hook ===
-section("Intent Gate Hook")
-const { createIntentGateHook } = await import("../src/hooks/intent-gate")
-const intentHook = createIntentGateHook()
-
-// Test: ultrawork keyword triggers injection
-{
-  const input: HookInput & { message: string } = { message: "ultrawork mode please" }
-  const output: any = {}
-  await intentHook(input, output)
-  assert(typeof output.injectedPrompt === "string" && output.injectedPrompt.length > 0,
-    "intent-gate sets injectedPrompt when keyword matches")
-}
-
-// Test: normal message passes through
-{
-  const input: HookInput & { message: string } = { message: "please help me fix this bug" }
-  const output: any = {}
-  await intentHook(input, output)
-  assert(output.injectedPrompt === undefined, "intent-gate does not inject prompt for normal messages")
-}
-
-// Test: empty message does not crash
-{
-  const input: HookInput & { message: string } = { message: "" }
-  const output: any = {}
-  await intentHook(input, output)
-  assert(output.injectedPrompt === undefined, "intent-gate handles empty message without crashing")
-}
-
 // === Comment Checker Hook ===
 section("Comment Checker Hook")
 const { createCommentCheckerHook } = await import("../src/hooks/comment-checker")
@@ -261,69 +230,6 @@ const commentChecker = createCommentCheckerHook()
   const output: HookOutput = {}
   await commentChecker(input, output)
   assert(output.content === undefined, "comment-checker handles missing content gracefully")
-}
-
-// === Rules Injector Hook ===
-section("Rules Injector Hook")
-const { createRulesInjectorHook } = await import("../src/hooks/rules-injector")
-const mockCtx = { projectPath: "/home/ir192m2/Documents/LLMs/mimocode-powerpack" }
-const rulesInjector = createRulesInjectorHook(mockCtx)
-
-// Test: runs without crashing on edit tool
-{
-  const input: HookInput = { tool: "edit", args: { file_path: "/home/ir192m2/Documents/LLMs/mimocode-powerpack/src/server.ts" } } as any
-  const output: any = {}
-  await rulesInjector(input, output)
-  assert(typeof output === "object", "rules-injector returns without crashing")
-}
-
-// Test: non-edit tools pass through
-{
-  const input: HookInput = { tool: "bash" } as any
-  const output: any = {}
-  await rulesInjector(input, output)
-  assert(output.injectedRules === undefined, "rules-injector does not inject rules for non-edit tools")
-}
-
-// === Model Fallback Hook ===
-section("Model Fallback Hook")
-const { createModelFallbackHook } = await import("../src/hooks/model-fallback")
-
-// Test: handles session error and returns void
-{
-  const modelFallback = createModelFallbackHook()
-  const input: HookInput & { type: string; error: any } = {
-    type: "session.error",
-    error: { message: "Rate limit exceeded", model: "mimo-v2.5-pro" },
-  } as any
-  const inputCopy = { ...input }
-  const result = await modelFallback(input)
-  assert(result === undefined, "model-fallback returns undefined (void)")
-  assertEq(JSON.stringify(input), JSON.stringify(inputCopy), "model-fallback does not mutate input")
-}
-
-// Test: non-error event type is ignored
-{
-  const modelFallback = createModelFallbackHook()
-  const input: HookInput & { type: string } = { type: "session.idle" } as any
-  const inputCopy = { ...input }
-  const result = await modelFallback(input)
-  assert(result === undefined, "model-fallback ignores non-error events")
-  assertEq(JSON.stringify(input), JSON.stringify(inputCopy), "model-fallback does not mutate non-error input")
-}
-
-// Test: multiple error events do not crash
-{
-  const modelFallback = createModelFallbackHook()
-  const events = [
-    { type: "session.error", error: { message: "err1", model: "m1" } },
-    { type: "session.error", error: { message: "err2", model: "m2" } },
-    { type: "session.error", error: { message: "err3", model: "m3" } },
-  ]
-  for (const event of events) {
-    const result = await modelFallback(event as any)
-    assert(result === undefined, `model-fallback handles repeated error event without crashing`)
-  }
 }
 
 // === Transform Pipeline Hook ===
@@ -649,57 +555,6 @@ const { isRecord, getToolName, getToolInput } = await import("../src/memory/mess
   assertEq(getToolInput(msg), null, "getToolInput returns null for message with no input")
 }
 
-// ============================================================
-// === Team Utils ===
-// ============================================================
-section("Team Utils")
-const { ensureDir } = await import("../src/team/utils")
-const { mkdtemp, rm, stat } = await import("node:fs/promises")
-const { join } = await import("node:path")
-const { tmpdir } = await import("node:os")
-
-// Test: creates directory if it doesn't exist
-{
-  const tmpBase = await mkdtemp(join(tmpdir(), "team-utils-test-"))
-  const targetDir = join(tmpBase, "new-dir", "nested")
-  await ensureDir(targetDir)
-  const st = await stat(targetDir)
-  assert(st.isDirectory(), "ensureDir creates nested directory that didn't exist")
-  await rm(tmpBase, { recursive: true, force: true })
-}
-
-// Test: doesn't throw if directory already exists
-{
-  const tmpBase = await mkdtemp(join(tmpdir(), "team-utils-test-"))
-  await ensureDir(tmpBase)
-  await ensureDir(tmpBase) // second call should not throw
-  const st = await stat(tmpBase)
-  assert(st.isDirectory(), "ensureDir does not throw when directory already exists")
-  await rm(tmpBase, { recursive: true, force: true })
-}
-
-// Test: creates deep nested directories
-{
-  const tmpBase = await mkdtemp(join(tmpdir(), "team-utils-test-"))
-  const deepPath = join(tmpBase, "a", "b", "c", "d", "e")
-  await ensureDir(deepPath)
-  const st = await stat(deepPath)
-  assert(st.isDirectory(), "ensureDir creates deeply nested directories")
-  await rm(tmpBase, { recursive: true, force: true })
-}
-
-// Test: directory has correct permissions (0o700)
-{
-  const tmpBase = await mkdtemp(join(tmpdir(), "team-utils-test-"))
-  const targetDir = join(tmpBase, "perm-test")
-  await ensureDir(targetDir)
-  const { mode } = await stat(targetDir)
-  // Check that the owner has read+write+execute (bits 0o700)
-  const permBits = (mode & 0o777)
-  assertEq(permBits, 0o700, `ensureDir creates directory with 0o700 permissions (got ${permBits.toString(8)})`)
-  await rm(tmpBase, { recursive: true, force: true })
-}
-
 // === Tool Discovery Hook ===
 section("Tool Discovery Hook")
 const { createToolDiscoveryHook } = await import("../src/hooks/tool-discovery")
@@ -751,6 +606,182 @@ const discoveryHook = createToolDiscoveryHook()
   const output = { messages: [] }
   await discoveryHook(input, output)
   assert(true, "tool-discovery handles empty messages array")
+}
+
+// === Safety Net Hook ===
+import { createSafetyNetHook } from "../src/hooks/safety-net"
+
+async function safetyCheck(command: string, cwd: string): Promise<string | null> {
+  const hook = createSafetyNetHook()
+  const input: any = { tool: "bash", directory: cwd }
+  const output: any = { args: { command }, content: "" }
+  await hook(input, output)
+  return (output.content as string) || null
+}
+
+section("Safety Net Hook")
+
+// Regression: gitSubcmd must extract the subcommand after global flags.
+// The old implementation discarded the IIFE result and broke out immediately,
+// returning { sub: null } for every command — all git protections were dead code.
+{
+  const r = await safetyCheck("git reset --hard HEAD", "/tmp/opencode/safety-test")
+  assert(!!r && r.includes("git reset --hard"), "safety-net blocks git reset --hard")
+}
+{
+  const r = await safetyCheck("git -C /tmp/opencode/safety-test status", "/tmp/opencode/safety-test")
+  assert(r === null, "safety-net allows git -C <dir> status")
+}
+{
+  const r = await safetyCheck("git push --force origin main", "/tmp/opencode/safety-test")
+  assert(!!r && r.includes("git push --force"), "safety-net blocks git push --force")
+}
+{
+  const r = await safetyCheck("git push --force-with-lease origin main", "/tmp/opencode/safety-test")
+  assert(r === null, "safety-net allows git push --force-with-lease")
+}
+{
+  const r = await safetyCheck("echo hello world", "/tmp/opencode/safety-test")
+  assert(r === null, "safety-net allows benign commands")
+}
+{
+  const r = await safetyCheck("rm -rf ~/Documents", "/tmp/opencode/safety-test")
+  assert(!!r && r.includes("rm -rf"), "safety-net blocks rm -rf on home")
+}
+{
+  const r = await safetyCheck("rm -rf /tmp/opencode/safety-test/x", "/tmp/opencode/safety-test")
+  assert(r === null, "safety-net allows rm -rf inside cwd (permission layer gates it)")
+}
+
+// Regression: tool.execute.before output contract is { args, cancel?, cancelReason? }.
+// content/modified are informational — cancel is what actually blocks the call.
+{
+  const hook = createSafetyNetHook()
+  const input: any = { tool: "bash", directory: "/tmp/opencode/safety-test" }
+  const output: any = { args: { command: "git reset --hard HEAD" }, content: "" }
+  await hook(input, output)
+  assert(output.cancel === true, "safety-net sets output.cancel=true on blocked commands")
+  assert(typeof output.cancelReason === "string" && output.cancelReason.length > 0, "safety-net sets output.cancelReason")
+  assert((output.content as string).includes("Safety Net"), "safety-net keeps informational content note")
+}
+
+// Regression: benign commands must not set cancel
+{
+  const hook = createSafetyNetHook()
+  const output: any = { args: { command: "echo hello" }, content: "" }
+  await hook({ tool: "bash", directory: "/tmp/opencode/safety-test" }, output)
+  assert(output.cancel !== true, "safety-net does not cancel benign commands")
+}
+
+// === Comment Checker (tool.execute.after output contract) ===
+section("Comment Checker output.output")
+
+// Regression: tool.execute.after output is { title, output, metadata } — the
+// warning must be appended to output.output, not output.content.
+{
+  const input: HookInput = { tool: "edit" } as any
+  const output: any = { title: "edit", output: "// This is simply the best approach" }
+  await commentChecker(input, output)
+  assert(typeof output.output === "string" && output.output.includes("Comment Checker"),
+    "comment-checker appends warning to output.output (tool.execute.after)")
+}
+
+// Clean output.output passes through unchanged
+{
+  const input: HookInput = { tool: "edit" } as any
+  const output: any = { title: "edit", output: "// Parse the input string" }
+  await commentChecker(input, output)
+  assertEq(output.output, "// Parse the input string", "comment-checker leaves clean output.output unchanged")
+}
+
+// === Server Plugin Wiring ===
+section("Server Plugin Wiring")
+const { default: powerpackModule } = await import("../src/server")
+
+// Regression: session.idle is an EVENT in MiMo-Code v0.1.7+ (EventSessionIdle),
+// not a hook — hooks["session.idle"] never fires. The plugin must wire
+// event consumers through hooks.event and lifecycle work through session.post.
+{
+  const fakeCtx = {
+    client: {
+      session: {
+        get: async () => ({ data: { directory: "/tmp/powerpack-test-server" } }),
+      },
+    },
+  }
+  const hooks = await powerpackModule.server(fakeCtx as any, { powerpack: {} })
+
+  assert(hooks["session.idle"] === undefined, "server does NOT register hooks['session.idle'] (dead hook)")
+  assert(typeof hooks.event === "function", "server registers hooks.event (session.idle events + notify)")
+  assert(typeof hooks["session.post"] === "function", "server registers hooks['session.post'] (auto-capture + quality gate)")
+
+  const tools = (hooks as any).tool ?? {}
+  assert(typeof tools.memory_search?.execute === "function", "server registers memory_search tool by default")
+  assert(typeof tools.memory_write?.execute === "function", "server registers memory_write tool by default")
+  assert(typeof tools.context_breakdown?.execute === "function", "server registers context_breakdown tool")
+  assert(typeof tools.actor_guide?.execute === "function", "server registers actor_guide tool")
+}
+
+// Disabled memory → no memory tools; unknown/deleted options are ignored
+{
+  const hooks = await powerpackModule.server({} as any, {
+    powerpack: {
+      memory: { enabled: false },
+      rulesInjector: { enabled: true },
+      modelFallback: { enabled: true },
+      intentGate: { enabled: true },
+      team: { enabled: false },
+      review: { enabled: false },
+      kimaki: { enabled: false },
+      quota: { providers: ["mimo"] },
+    } as any,
+  })
+  const tools = (hooks as any).tool ?? {}
+  assert(tools.memory_search === undefined, "memory disabled → no memory_search tool")
+  assert(tools.memory_write === undefined, "memory disabled → no memory_write tool")
+  assert(typeof hooks.event === "function", "unknown config keys don't break hook registration (event)")
+}
+
+// session.post auto-captures trajectory text into the memory store
+{
+  const testDir = "/tmp/powerpack-test-server"
+  const { mkdirSync, rmSync } = await import("node:fs")
+  const { join } = await import("node:path")
+  rmSync(testDir, { recursive: true, force: true })
+  mkdirSync(join(testDir, ".mimocode"), { recursive: true })
+
+  const fakeCtx = {
+    client: {
+      session: {
+        get: async () => ({ data: { directory: testDir } }),
+      },
+    },
+  }
+  const hooks = await powerpackModule.server(fakeCtx as any, { powerpack: {} })
+  await hooks["session.post"]({
+    sessionID: "ses-capture-test",
+    outcome: "completed",
+    trajectory: [
+      { role: "user", id: "u1", parts: [{ type: "text", text: "Let's fix the authentication middleware architecture" }] },
+      { role: "assistant", id: "a1", parts: [{ type: "text", text: "The auth module uses JWT tokens with refresh rotation for secure session handling" }] },
+    ],
+  })
+
+  const { getMemoryStore } = await import("../src/memory/store")
+  const { getMemoryDbPath } = await import("../src/memory/types")
+  const store = getMemoryStore(getMemoryDbPath(testDir))
+  const all = store.getAll(testDir)
+  assert(all.length > 0, `session.post auto-capture stores trajectory memories (got ${all.length})`)
+  rmSync(testDir, { recursive: true, force: true })
+}
+
+// hooks.event dispatches session.idle events to the todo enforcer without throwing
+{
+  const hooks = await powerpackModule.server({} as any, {
+    powerpack: { todoEnforcer: { enabled: true } },
+  })
+  const result = await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses-idle-test" } } })
+  assert(result === undefined, "hooks.event dispatches session.idle without throwing")
 }
 
 // ============================================================

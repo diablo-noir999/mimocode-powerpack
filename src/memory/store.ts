@@ -104,6 +104,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 );
 `;
 
+/**
+ * Migrate DBs created before payload_type/payload columns existed.
+ * CREATE TABLE IF NOT EXISTS never alters existing tables, so missing
+ * columns must be added explicitly.
+ */
+function migrateLegacySchema(db: Database): void {
+  const cols = new Set(
+    (db.query("PRAGMA table_info(memories)").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  const additions: Array<[string, string]> = [];
+  if (!cols.has("payload_type")) additions.push(["payload_type", "TEXT"]);
+  if (!cols.has("payload")) additions.push(["payload", "TEXT"]);
+  for (const [name, type] of additions) {
+    db.exec(`ALTER TABLE memories ADD COLUMN ${name} ${type}`);
+  }
+}
+
 const FTS_TRIGGERS_SQL = `
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
   INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
@@ -141,6 +158,7 @@ export class MemoryStore {
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(SCHEMA_SQL);
+    migrateLegacySchema(this.db);
     this.db.exec(FTS_SCHEMA_SQL);
     this.db.exec(FTS_TRIGGERS_SQL);
 

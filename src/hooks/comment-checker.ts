@@ -63,11 +63,15 @@ const COMBINED_SLOP_DETECT = new RegExp(
 )
 
 export function createCommentCheckerHook() {
-  return async (input: HookInput, output: HookOutput) => {
+  return async (input: HookInput, output: any) => {
     if (input.tool !== "edit") return
-    if (!output?.content || typeof output.content !== "string") return
 
-    const content = output.content
+    // tool.execute.after output contract: { title, output, metadata }.
+    // Fall back to output.content for other hook contexts.
+    const target = output?.output ?? output?.content
+    if (typeof target !== "string") return
+
+    const content = target
     const issues: string[] = []
 
     // Phase 1: Fast one-pass detection with combined regex
@@ -85,7 +89,11 @@ export function createCommentCheckerHook() {
     if (issues.length > 0) {
       // Add a warning to the output
       const warning = `\n\n⚠️ Comment Checker: Detected AI slop patterns: ${issues.join(", ")}. Consider removing these for cleaner comments.`
-      output.content = content + warning
+      if (typeof output.output === "string") {
+        output.output = content + warning
+      } else if (typeof output.content === "string") {
+        output.content = content + warning
+      }
     }
   }
 }

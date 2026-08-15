@@ -1,6 +1,6 @@
 # Powerpack Agent Instructions
 
-You are running with the Powerpack plugin. Powerpack tools are not optional — they exist because generic tools are slower, less safe, or miss context.
+You are running with the Powerpack plugin for MiMoCode. Powerpack tools are not optional — they exist because generic tools are slower, less safe, or miss context.
 
 ---
 
@@ -11,14 +11,11 @@ You are running with the Powerpack plugin. Powerpack tools are not optional — 
    → if results: read them before touching any file
    → if empty: proceed, but write to memory at your first decision
 
-2. task create "<one-line summary of what you're about to do>"
-   → note the ID (T1, T2, ...) — you'll need it
-
-3. context_breakdown()
+2. context_breakdown()
    → only if context already feels large; check before adding more
 ```
 
-That's it. Three calls, then work.
+That's it. Two calls, then work.
 
 ---
 
@@ -28,7 +25,7 @@ That's it. Three calls, then work.
 
 ```
 memory_search("auth token refresh")
-→ returns: "BUG_FIX 2024-01-10: refresh tokens expire silently, must check exp field not iat"
+→ returns: "BUG_FIXES 2024-01-10: refresh tokens expire silently, must check exp field not iat"
 → action: check exp field before writing any token logic
 ```
 
@@ -37,6 +34,8 @@ For relationship queries ("how does X relate to Y", "what depends on auth.ts"):
 memory_search("auth middleware", mode: "graph")
 → traverses knowledge graph → returns connected nodes and edges
 ```
+
+Modes: `hybrid` (default, vector+BM25), `semantic` (vector-only, needs embeddings), `fts` (BM25-only), `tfidf` (TF-IDF cosine), `graph` (knowledge-graph traversal). Falls back to `fts` automatically if embeddings are unavailable.
 
 If it returns nothing, proceed — but write your findings when you're done.
 
@@ -48,31 +47,18 @@ If it returns nothing, proceed — but write your findings when you're done.
 
 ```
 memory_write({
-  category: "BUG_FIX",
+  category: "BUG_FIXES",
   content: "Fixed null dereference in auth.ts:42 — was checking user.id before null guard. Always check user != null first."
 })
 ```
 
 Categories: `PROJECT_RULES` · `ARCHITECTURE` · `CONSTRAINTS` · `CONFIG_VALUES` · `NAMING` · `LESSONS_LEARNED` · `BUG_FIXES` · `USER_PREFERENCES`
 
-Write immediately after the decision. If you wait until end of session, you'll forget or get compacted.
+Entries deduplicate by normalized content hash; existing entries are refreshed (seen/retrieval counters, recency) instead of duplicated. Write immediately after the decision. If you wait until end of session, you'll forget or get compacted.
 
 ---
 
-### task tool — one entry per non-trivial unit of work
-
-```
-task create "Fix null dereference in auth token refresh"   → T1
-task start T1
-  ... do the work ...
-task done T1
-```
-
-Subtasks: `T1.1`, `T1.2`. Mark done the moment work completes — never batch.
-
----
-
-### actor_guide + spawn — the only safe way to spawn a subagent
+### actor_guide — the only safe way to spawn a subagent
 
 **Wrong:** guessing the spawn JSON format.
 
@@ -93,7 +79,7 @@ Subtasks: `T1.1`, `T1.2`. Mark done the moment work completes — never batch.
 4. wait(spawn_id) only when you need the result before the next step
 ```
 
-Never use `run` — it blocks the entire session.
+Never use `run` — it blocks the entire session. `spawn`/`wait` are MiMoCode's built-in actor tools; `actor_guide` gives you their exact schema.
 
 ---
 
@@ -111,16 +97,13 @@ Use when a search would take more than 3 queries. Pass one of: `"quick"`, `"medi
 
 ---
 
-### ralph_loop — for iterative fix cycles
+### context_breakdown — before context gets heavy
 
 ```
-ralph_loop({
-  prompt: "Run the test suite and fix any failures in auth.test.ts one at a time",
-  completion_signal: "All tests pass"
-})
+context_breakdown()
+→ per-category and per-tool token usage charts
+→ use it to decide what to prune or delegate before adding more context
 ```
-
-Never manually retry the same failing prompt. If you're looping more than twice on the same thing, that's ralph_loop's job.
 
 ---
 
@@ -148,30 +131,6 @@ Why: Working directly bloats your context window. A subagent with a focused prom
 
 ---
 
-### review flow — for code review
-
-```
-review_start()                           → returns session ID
-review_annotate(session, file, line, comment)   → add feedback on a line
-review_approve(session, "approve")       → or review_approve(session, "deny", "reason")
-```
-
-P0 = must fix before merge. P1 = should fix. P2 = suggestion. P3 = nit.
-
----
-
-## Workflow Table
-
-| Stage | When | Tool/Skill | Delegate To |
-|-------|------|------------|-------------|
-| Explore | New codebase, unfamiliar module, >3 queries | `skill("recon")` or spawn `@explore` | `@explore` |
-| Plan | Multi-file change, ambiguity, multiple valid approaches | `skill("plan")` → plan mode → user approves → exit | Do yourself (planning = thinking, not typing) |
-| Build | Plan approved or task is clear | `skill("build")` — one task at a time | `@general` per task |
-| Verify | Before any "done" claim | `skill("verify")` + `skill("validation-pipeline")` | `@code-reviewer` + `@test-engineer` |
-| Checkpoint | Every milestone, before context gets large | `skill("checkpoint")` | Do yourself |
-
----
-
 ## Agent Dispatch
 
 | Task | Agent |
@@ -181,15 +140,12 @@ P0 = must fix before merge. P1 = should fix. P2 = suggestion. P3 = nit.
 | Test authoring (positive + negative) | `@test-engineer` |
 | Code review with P0-P3 severity | `@code-reviewer` |
 | Safe incremental refactoring | `@refactoring-specialist` |
-| Profiling, bottleneck identification | `@performance-engineer` |
-| CI/CD, infra, deployment | `@devops-engineer` |
-| DB schema, queries, migrations | `@database-reviewer` |
-| REST/GraphQL API design | `@api-designer` |
-| Compliance (GDPR, HIPAA, SOC2) | `@compliance-auditor` |
+| History compression (session summaries) | `@historian` |
+| Memory consolidation / curation | `@dreamer` |
 | Read-only exploration >3 queries | `@explore` |
 | Multi-step fallback | `@general` |
 
-**Spawn vs Workflow:** one focused subagent → `actor_guide` + `spawn`. Multiple agents with phases/parallelism → `skill("plan")` first, then Workflow tool. Only use Workflow when the user opts in or the task is too large for one subagent.
+`@explore` and `@general` are MiMoCode built-ins; the other seven ship with Powerpack and are installed to `~/.config/mimocode/agents/`.
 
 ---
 
@@ -222,18 +178,21 @@ Load with `skill("name")`. Match skill to stage.
 
 ## Hooks (Automatic — No Action Needed)
 
-- `comment-checker` — anti-slop on edits
-- `dedup-prune` — tool call deduplication
-- `error-prune` — error input pruning
-- `transform-pipeline` — context pruning + cache layout + brain context injection
-- `safety-net` — blocks dangerous git/rm/find operations
-- Proximity-aware rules injection near edited files
+- `dedup-prune` — duplicate tool calls pruned from context
+- `error-prune` — errored tool inputs pruned after a configurable number of turns
+- `transform-pipeline` — smart context drops, cache-layout optimization, session-fact extraction
+- `comment-checker` — flags AI-slop patterns in tool output
+- `safety-net` — blocks dangerous git/rm/find commands (cancels the tool call)
+- `todo-enforcer` — stops idle agents stuck on incomplete tasks
+- `notify` — OS notifications for session events (quiet hours 22:00-08:00)
+- `quality-gate` — session-level checks (off by default)
+- `tool-discovery` — registered but a no-op on MiMoCode v0.1.7+ (message-format mismatch)
 
 ---
 
 ## Testing
 
-The plugin ships 12 test suites under `test/` with 530+ tests. Run `bun run test/run-all.ts` for the full suite, or individual files for targeted testing.
+The plugin ships 10 test suites under `test/`. Run `bun run test/run-all.ts` for the full suite, or individual files for targeted testing.
 
 **When to write tests:**
 - After fixing a bug → add a regression test in the relevant suite
@@ -243,8 +202,8 @@ The plugin ships 12 test suites under `test/` with 530+ tests. Run `bun run test
 **Test structure:** Each suite uses a flat assert/assertEq pattern (no test framework). Sections group related tests. Exit code 0 = pass, 1 = fail.
 
 **Key test files:**
-- `test-hooks.ts` — all hooks + utility modules (dedup, error-prune, intent-gate, comment-checker, rules-injector, model-fallback, transform-pipeline, notify, todo-enforcer, tool-discovery, memory-utils, message-utils, team/utils)
-- `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF/hybrid/graph), decay math, batch ops, typed payloads, feedback-weighted search
+- `test-hooks.ts` — hooks (dedup, error-prune, comment-checker, transform-pipeline, notify, todo-enforcer, safety-net, tool-discovery) + memory-utils, message-utils, server plugin wiring
+- `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF/hybrid/graph), decay math, batch ops, typed payloads, feedback-weighted search, legacy schema migration
 - `test-knowledge-graph.ts` — KnowledgeGraph node/edge CRUD, k-hop traversal, FTS search, subgraph extraction, stats
 - `test-compression.ts` — content-router, json-crusher, code-compressor, compress index
 - `test-cache-layout.ts` — m0/m1/m2 zone classification, bust severity, stability score
@@ -252,8 +211,6 @@ The plugin ships 12 test suites under `test/` with 530+ tests. Run `bun run test
 - `test-token-utils.ts` — token estimation for text and messages
 - `test-decay-render.ts` — compartment rendering, tier logic, M0 block extraction
 - `test-skills.ts` — YAML parser, skill installer, metadata
-- `test-team.ts` — mailbox (send/receive/ack, path traversal), tasklist (create/claim, contention)
-- `test-compat-quota.ts` — QuotaService, ReviewServer, Kimaki config, RalphLoop
 - `test-brain-gather.ts` — checkpoint parsing, session scanning, memory grouping, brain data gathering
 
 ---
@@ -264,10 +221,7 @@ The plugin ships 12 test suites under `test/` with 530+ tests. Run `bun run test
 
 ```
 memory_search("auth bug")
-→ "BUG_FIX: refresh tokens use iat field, should use exp — checked 2024-01-10"
-
-task create "Fix token expiry bug in auth.ts"   → T1
-task start T1
+→ "BUG_FIXES: refresh tokens use iat field, should use exp — checked 2024-01-10"
 
 spawn(@debugger, {
   task: "Find the root cause of the token expiry bug in src/auth.ts. Report the file, line, and fix needed.",
@@ -284,8 +238,7 @@ wait(spawn_id)
 skill("validation-pipeline")
 → all tests pass
 
-memory_write({ category: "BUG_FIX", content: "auth.ts:87 — was checking iat (issued-at), must check exp (expiry). Token timestamps are in seconds, Date.now() in ms." })
-task done T1
+memory_write({ category: "BUG_FIXES", content: "auth.ts:87 — was checking iat (issued-at), must check exp (expiry). Token timestamps are in seconds, Date.now() in ms." })
 ```
 
 ---
@@ -296,8 +249,6 @@ task done T1
 memory_search("rate limit API")
 → nothing
 
-task create "Add rate limiting to API routes"   → T1
-
 spawn(@explore, { task: "Map the current middleware stack in the API. Find all route files and middleware. Return a summary of the auth flow and where rate limiting should go.", thoroughness: "medium" })
 wait(spawn_id)
 → understand current middleware stack
@@ -305,41 +256,18 @@ wait(spawn_id)
 skill("plan")    → design rate-limit approach, present to user
 → user approves
 
-task create "Implement rate-limit middleware"   → T1.1
-task start T1.1
-
 spawn(@general, {
   task: "Create middleware/rateLimit.ts with a sliding-window rate limiter (100 req/min per IP). Then edit routes/index.ts to wire it in before the auth middleware. Create both files with edit/write."
 })
 wait(spawn_id)
 
 skill("validation-pipeline")
-task done T1.1
 
 spawn(@test-engineer, { task: "write tests for rateLimit middleware — positive (allows under limit) and negative (blocks over limit)" })
 wait(spawn_id)
 
-task done T1
 memory_write({ category: "ARCHITECTURE", content: "Rate limiting via middleware/rateLimit.ts, applied at routes/index.ts before auth. Uses sliding window, 100 req/min per IP." })
 skill("checkpoint")
-```
-
----
-
-### "Review this PR"
-
-```
-session = review_start()
-
-spawn(@code-reviewer, {
-  task: "Review the diff for security issues, correctness, and performance. Tag findings P0-P3."
-})
-wait(spawn_id)
-
-→ findings: "P1: SQL query in user.ts:34 concatenates user input — use parameterized query"
-
-review_annotate(session, "user.ts", 34, "P1: SQL injection risk — use db.query('SELECT * FROM users WHERE id = ?', [id])")
-review_approve(session, "approve")   // or review_approve(session, "deny", "reason") if P0 found
 ```
 
 ---
@@ -348,7 +276,7 @@ review_approve(session, "approve")   // or review_approve(session, "deny", "reas
 
 ```
 memory_search("test failures")
-→ "LESSON: auth tests fail if JWT_SECRET env var not set in test environment"
+→ "LESSONS_LEARNED: auth tests fail if JWT_SECRET env var not set in test environment"
 
 // if that's not the issue:
 spawn(@debugger, {

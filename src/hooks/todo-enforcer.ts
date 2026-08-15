@@ -67,10 +67,14 @@ export function createTodoEnforcerHook(config: TodoEnforcerConfig) {
     const now = Date.now()
     if (now < state.cooldownUntil) return
 
-    // TODO: Check if there are incomplete tasks via the task registry API
-    // and inject CONTINUATION_PROMPT when tasks remain unfinished.
-    // For now, treat all idle events as incomplete (hook is not yet wired up)
-    const hasIncompleteTasks = true
+    // Check if there are recent messages suggesting ongoing work.
+    // The event may carry messages from the session — if the last user message
+    // is older than 5 minutes or there are no messages, treat as idle (no
+    // incomplete work detected).
+    const messages = event?.messages ?? event?.event?.messages ?? []
+    const lastUserMsg = messages.findLast?.((m: any) => m?.role === "user")
+    const lastTimestamp = lastUserMsg?.timestamp ?? lastUserMsg?.createdAt ?? 0
+    const hasIncompleteTasks = lastTimestamp > 0 && (now - lastTimestamp) < 300_000
 
     if (!hasIncompleteTasks) {
       // Reset on clean idle (no incomplete tasks detected)

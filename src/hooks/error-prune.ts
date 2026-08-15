@@ -29,6 +29,14 @@ export function createErrorPruneHook(turnsBeforePrune: number = 4) {
 
     if (lastUserIndex === -1) return
 
+    // Pre-compute prefix sum: userCountBefore[i] = number of user messages
+    // at indices [0, i-1]. This lets us count user messages in any range in O(1).
+    const userCountBefore: number[] = new Array(messages.length + 1)
+    userCountBefore[0] = 0
+    for (let i = 0; i < messages.length; i++) {
+      userCountBefore[i + 1] = userCountBefore[i] + (messages[i].info?.role === "user" ? 1 : 0)
+    }
+
     // Scan for tool errors and prune old ones
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i]
@@ -39,12 +47,8 @@ export function createErrorPruneHook(turnsBeforePrune: number = 4) {
         if (part?.type !== "tool") continue
         if (part.state?.status !== "error") continue
 
-        // Count user messages between this error and the last user message.
-        // Each user message represents one conversation turn.
-        let turnsSince = 0
-        for (let j = i + 1; j <= lastUserIndex; j++) {
-          if (messages[j].info?.role === "user") turnsSince++
-        }
+        // User messages in [i+1, lastUserIndex] via prefix sum
+        const turnsSince = userCountBefore[lastUserIndex + 1] - userCountBefore[i + 1]
 
         if (turnsSince < turnsBeforePrune) continue
 

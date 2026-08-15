@@ -11,7 +11,9 @@ import { rowToMemory } from "../src/memory/memory-utils"
 import { isRecord, getToolName, getToolInput } from "../src/memory/message-utils"
 import { getMemoryDbPath } from "../src/memory/types"
 import type { MemoryCategory } from "../src/memory/types"
+import { Database } from "bun:sqlite"
 import { mkdirSync, rmSync } from "node:fs"
+import { join } from "node:path"
 
 const TEST_DB_DIR = "/tmp/powerpack-test-memory"
 const TEST_DB = `${TEST_DB_DIR}/test.db`
@@ -732,6 +734,125 @@ section("memory-utils: rowToMemory with payload")
   assertEq(memBad.payloadType, null, "rowToMemory handles invalid payload JSON gracefully")
   assertEq(memBad.payload, null, "rowToMemory returns null for invalid payload JSON")
 }
+
+section("Legacy schema migration")
+const LEGACY_DB_DIR = "/tmp/powerpack-test-memory-legacy"
+const LEGACY_DB = `${LEGACY_DB_DIR}/legacy.db`
+mkdirSync(LEGACY_DB_DIR, { recursive: true })
+rmSync(LEGACY_DB, { force: true })
+
+// Create a DB with the old schema (no payload_type/payload columns) + one row
+{
+  const legacy = new Database(LEGACY_DB)
+  legacy.exec(`
+    CREATE TABLE memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      category TEXT NOT NULL,
+      content TEXT NOT NULL,
+      normalized_hash TEXT NOT NULL,
+      importance INTEGER NOT NULL DEFAULT 50,
+      scope TEXT NOT NULL DEFAULT 'project',
+      source_session_id TEXT,
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      seen_count INTEGER NOT NULL DEFAULT 1,
+      retrieval_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      last_retrieved_at INTEGER,
+      status TEXT NOT NULL DEFAULT 'active',
+      expires_at INTEGER
+    );
+  `)
+  legacy.prepare(
+    `INSERT INTO memories (project_path, category, content, normalized_hash, importance, scope, source_type, seen_count, retrieval_count, created_at, updated_at, last_seen_at, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ).run("/legacy/project", "ARCHITECTURE", "Legacy memory row", "legacy1", 50, "project", "manual", 1, 0, 1, 1, 1, "active")
+  legacy.close()
+}
+
+// Opening MemoryStore on a legacy DB must migrate the schema, not crash
+const legacyStore = new MemoryStore(LEGACY_DB)
+const migratedCols = new Set(
+  (legacyStore.getDb().query("PRAGMA table_info(memories)").all() as Array<{ name: string }>).map((c) => c.name),
+)
+assert(migratedCols.has("payload_type"), "migration adds payload_type column")
+assert(migratedCols.has("payload"), "migration adds payload column")
+
+// Insert with payload must work after migration
+const legacyInsert = legacyStore.insert({
+  projectPath: "/legacy/project",
+  category: "CONFIG_VALUES",
+  content: "Post-migration insert with payload",
+  payload: { type: "qa", question: "Migrated?", answer: "Yes" } as any,
+})
+assert(legacyInsert.id > 0, "insert with payload works after migration")
+
+// Search must work for rows inserted after migration (legacy rows were never FTS-indexed)
+const legacyResults = searchFTS(legacyStore, "/legacy/project", "payload")
+assert(legacyResults.length >= 1, "FTS search works after migration")
+
+// Idempotency: opening the migrated DB again must not re-add columns or crash
+{
+  const reopened = new MemoryStore(LEGACY_DB)
+  const colsAfterReopen = new Set(
+    (reopened.getDb().query("PRAGMA table_info(memories)").all() as Array<{ name: string }>).map((c) => c.name),
+  )
+  assert(colsAfterReopen.has("payload_type"), "reopened legacy DB still has payload_type (no duplicate column)")
+  assert(colsAfterReopen.has("payload"), "reopened legacy DB still has payload (no duplicate column)")
+
+  const secondInsert = reopened.insert({
+    projectPath: "/legacy/project",
+    category: "BUG_FIXES",
+    content: "Second post-migration insert works on reopened store",
+    payloadType: "qa",
+    payload: { type: "qa", question: "Again?", answer: "Yes" } as any,
+  })
+  assert(secondInsert.payloadType === "qa", "insert with payload works on reopened store")
+
+  const thirdOpen = new MemoryStore(LEGACY_DB)
+  assert(thirdOpen.count("/legacy/project") >= 2, "third open reads all rows")
+  thirdOpen.close()
+  reopened.close()
+}
+rmSync(LEGACY_DB_DIR, { recursive: true, force: true })
+
+section("Memory Tools (memory_write / memory_search)")
+const TOOL_DB_DIR = "/tmp/powerpack-test-memory-tools"
+mkdirSync(TOOL_DB_DIR, { recursive: true })
+rmSync(TOOL_DB_DIR, { recursive: true, force: true })
+mkdirSync(join(TOOL_DB_DIR, ".mimocode"), { recursive: true })
+
+// Tool-level end-to-end: memory_write saves + dedupes, memory_search finds
+{
+  const { createMemoryWriteTool } = await import("../src/tools/memory-write")
+  const { createMemorySearchTool } = await import("../src/tools/memory-search")
+  const writeTool = createMemoryWriteTool({} as any)
+  const searchTool = createMemorySearchTool({} as any)
+  const ctx: any = { sessionID: "tool-test-session", directory: TOOL_DB_DIR }
+  const content = "The powerpack test project uses bun as its runtime and sqlite for persistent storage"
+
+  const saved = await writeTool.execute({ content, category: "ARCHITECTURE" }, ctx)
+  assert(typeof saved === "string" && saved.includes("Memory saved"), `memory_write saves a memory (got "${saved}")`)
+
+  const dup = await writeTool.execute({ content, category: "ARCHITECTURE" }, ctx)
+  assert(typeof dup === "string" && dup.includes("already exists"), `memory_write dedupes identical content (got "${dup}")`)
+
+  const invalid = await writeTool.execute({ content, category: "NOT_A_CATEGORY" }, ctx)
+  assert(typeof invalid === "string" && invalid.includes("Invalid category"), "memory_write rejects invalid category")
+
+  const searchRes = await searchTool.execute({ query: "bun sqlite runtime", limit: 5 }, ctx)
+  assert(typeof searchRes === "string" && searchRes.includes("Memory Search Results"), "memory_search returns results")
+  assert(typeof searchRes === "string" && searchRes.includes("powerpack test project"), "memory_search finds the written memory")
+
+  const empty = await searchTool.execute({ query: "nonexistenttermxyz", limit: 5 }, ctx)
+  assert(typeof empty === "string" && empty.includes("No memories found"), "memory_search reports empty results")
+
+  // Category filter narrows results
+  const filtered = await searchTool.execute({ query: "bun", category: "BUG_FIXES", limit: 5 }, ctx)
+  assert(typeof filtered === "string" && filtered.includes("No memories found"), "memory_search category filter applies")
+}
+rmSync(TOOL_DB_DIR, { recursive: true, force: true })
 
 // Cleanup
 rmSync(TEST_DB_DIR, { recursive: true, force: true })
