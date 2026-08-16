@@ -13,47 +13,51 @@ import type { HookInput, HookOutput } from "../types"
 
 export function createDedupPruneHook() {
   return async (input: HookInput, output: HookOutput) => {
-    if (!output?.messages?.length) return
+    try {
+      if (!output?.messages?.length) return
 
-    const messages = output.messages
-    // hash -> latest { msgIdx, partIdx }
-    const seen = new Map<string, { msgIdx: number; partIdx: number }>()
+      const messages = output.messages
+      // hash -> latest { msgIdx, partIdx }
+      const seen = new Map<string, { msgIdx: number; partIdx: number }>()
 
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i]
-      if (msg.info?.role !== "assistant") continue
-      if (!Array.isArray(msg.parts)) continue
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]
+        if (msg.info?.role !== "assistant") continue
+        if (!Array.isArray(msg.parts)) continue
 
-      for (let j = 0; j < msg.parts.length; j++) {
-        const part = msg.parts[j]
-        if (part?.type !== "tool") continue
+        for (let j = 0; j < msg.parts.length; j++) {
+          const part = msg.parts[j]
+          if (part?.type !== "tool") continue
 
-        // FNV-1a hash from tool name + serialized input
-        const key = `${part.tool}:${JSON.stringify(part.state?.input ?? {})}`
-        let hashVal = 0x811c9dc5
-        for (let k = 0; k < key.length; k++) {
-          hashVal ^= key.charCodeAt(k)
-          hashVal = (hashVal * 0x01000193) | 0
-        }
-        const hash = (hashVal >>> 0).toString(36)
-
-        if (seen.has(hash)) {
-          // Duplicate — clear the OLDER one's payload
-          const older = seen.get(hash)!
-          const olderMsg = messages[older.msgIdx]
-          if (olderMsg && olderMsg.parts[older.partIdx]) {
-            const olderPart = olderMsg.parts[older.partIdx]
-            if (olderPart.state?.status === "completed") {
-              olderPart.state.input = {}
-              olderPart.state.output = "[Duplicate tool output pruned]"
-            }
+          // FNV-1a hash from tool name + serialized input
+          const key = `${part.tool}:${JSON.stringify(part.state?.input ?? {})}`
+          let hashVal = 0x811c9dc5
+          for (let k = 0; k < key.length; k++) {
+            hashVal ^= key.charCodeAt(k)
+            hashVal = (hashVal * 0x01000193) | 0
           }
-          // Track the newer occurrence
-          seen.set(hash, { msgIdx: i, partIdx: j })
-        } else {
-          seen.set(hash, { msgIdx: i, partIdx: j })
+          const hash = (hashVal >>> 0).toString(36)
+
+          if (seen.has(hash)) {
+            // Duplicate — clear the OLDER one's payload
+            const older = seen.get(hash)!
+            const olderMsg = messages[older.msgIdx]
+            if (olderMsg && olderMsg.parts[older.partIdx]) {
+              const olderPart = olderMsg.parts[older.partIdx]
+              if (olderPart.state?.status === "completed") {
+                olderPart.state.input = {}
+                olderPart.state.output = "[Duplicate tool output pruned]"
+              }
+            }
+            // Track the newer occurrence
+            seen.set(hash, { msgIdx: i, partIdx: j })
+          } else {
+            seen.set(hash, { msgIdx: i, partIdx: j })
+          }
         }
       }
+    } catch (err) {
+      console.error("[dedup-prune] hook failed:", err instanceof Error ? err.message : err)
     }
   }
 }

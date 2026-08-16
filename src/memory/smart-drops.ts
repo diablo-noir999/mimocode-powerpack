@@ -80,6 +80,41 @@ function isStaleReduceCall(message: any): boolean {
   return toolName === "ctx_reduce";
 }
 
+/**
+ * Whether a value is a non-empty input payload (string with length, or an
+ * object/array with at least one key/element).
+ */
+function hasNonEmptyInput(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.length > 0;
+  if (typeof value === "object") {
+    return Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0;
+  }
+  return true;
+}
+
+/**
+ * Whether a message carries tool-related parts (tool call, tool result,
+ * pending/in-flight state). Such messages are NEVER drop candidates —
+ * replacing them leaves dangling tool calls / interrupted executions in
+ * the run loop.
+ */
+function hasToolParts(message: any): boolean {
+  if (!Array.isArray(message.parts)) return false;
+  for (const part of message.parts) {
+    if (!isRecord(part)) continue;
+    if (typeof part.type === "string" && (part.type === "tool" || part.type === "tool-result" || part.type === "tool-invocation" || part.type === "tool-call")) return true;
+    if (typeof part.callID === "string" || typeof part.callId === "string" || typeof part.toolCallID === "string") return true;
+    if (typeof part.tool === "string" || typeof part.toolName === "string") return true;
+    if (isRecord(part.state)) {
+      const status = part.state.status;
+      if (typeof status === "string" && (status === "pending" || status === "running" || status === "in-progress" || status === "in_progress")) return true;
+      if (hasNonEmptyInput(part.state.input) || hasNonEmptyInput(part.state.output)) return true;
+    }
+  }
+  return false;
+}
+
 // === Drop Strategies ===
 
 /**
@@ -170,6 +205,15 @@ function findLowValueMessages(
     // Skip user messages — they anchor turn boundaries
     if (msg.role === "user") continue;
 
+    // WithParts messages ({ info, parts }) have no flat `.role` and their
+    // role lives in info.role — never drop candidates. Replacing them can
+    // destroy in-flight tool state (dangling tool calls).
+    if (!isRecord(msg) || typeof msg.role !== "string") continue;
+    // Only plain string-content messages are eligible for low-value drops
+    if (typeof msg.content !== "string") continue;
+    // Never drop messages whose parts carry tool state
+    if (hasToolParts(msg)) continue;
+
     if (isDroppedPlaceholder(msg)) {
       candidates.push({
         index: i,
@@ -205,6 +249,9 @@ function findStaleReduceCalls(
 
   for (let i = 0; i < messages.length; i++) {
     if (!isStaleReduceCall(messages[i])) continue;
+    // A tool-bearing message (pending state, tool result) must never be
+    // dropped — it can hold in-flight tool state.
+    if (hasToolParts(messages[i])) continue;
 
     const age = lastUserIndex >= 0 ? lastUserIndex - i : messages.length - i;
     if (age <= STALE_REDUCE_MIN_AGE) continue; // Keep recent reduce calls
@@ -277,6 +324,11 @@ export function applyDrops(messages: any[], candidates: DropCandidate[]): number
 
     // Never drop user messages — they anchor turn boundaries
     if (msg.role === "user") continue;
+
+    // Never transform a message in-place if it contains tool parts — only
+    // drop messages verified safe. Replacing a tool-bearing message leaves
+    // a dangling tool call / pending state in the run loop.
+    if (hasToolParts(msg)) continue;
 
     // Replace content with a minimal placeholder
     if (typeof msg.content === "string") {

@@ -114,25 +114,41 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   // Context management: deduplicate repeated tool calls + transform pipeline
   if (config.dedupPrune.enabled || config.errorPrune.enabled || config.transform.enabled) {
     hooks["experimental.chat.messages.transform"] = async (input: any, output: any) => {
-      if (cachedToolDiscoveryHook) await cachedToolDiscoveryHook(input, output)
-      if (cachedDedupHook) await cachedDedupHook(input, output)
-      if (cachedErrorHook) await cachedErrorHook(input, output)
-      if (cachedTransformHook) await cachedTransformHook(input, output)
+      try {
+        if (cachedToolDiscoveryHook) await cachedToolDiscoveryHook(input, output)
+        if (cachedDedupHook) await cachedDedupHook(input, output)
+        if (cachedErrorHook) await cachedErrorHook(input, output)
+        if (cachedTransformHook) await cachedTransformHook(input, output)
+      } catch (err) {
+        // A throw here fails the whole LLM step in MiMoCode's run loop
+        // (no timeout, no catch around the transform hook). Never escape.
+        console.error("[powerpack] transform hook failed:", err instanceof Error ? err.message : err)
+      }
     }
   }
 
   // Tool lifecycle: comment checker
-  hooks["tool.execute.after"] = async (input: any, output: any) => {
-    if (cachedCommentHook && (input.tool === "edit" || input.tool === "write")) {
-      await cachedCommentHook(input, output)
+  if (config.commentChecker.enabled) {
+    hooks["tool.execute.after"] = async (input: any, output: any) => {
+      try {
+        if (cachedCommentHook && (input.tool === "edit" || input.tool === "write")) {
+          await cachedCommentHook(input, output)
+        }
+      } catch (err) {
+        console.error("[powerpack] tool.execute.after hook failed:", err instanceof Error ? err.message : err)
+      }
     }
   }
 
   // Safety net for bash
   if (config.safetyNet.enabled) {
     hooks["tool.execute.before"] = async (input: any, output: any) => {
-      if (cachedSafetyNetHook && input.tool === "bash") {
-        await cachedSafetyNetHook(input, output)
+      try {
+        if (cachedSafetyNetHook && input.tool === "bash") {
+          await cachedSafetyNetHook(input, output)
+        }
+      } catch (err) {
+        console.error("[powerpack] tool.execute.before hook failed:", err instanceof Error ? err.message : err)
       }
     }
   }
@@ -151,78 +167,86 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
 
   if (needsEventHook) {
     hooks.event = async (input: any) => {
-      const event = input?.event ?? input
-      const eventType = event?.type ?? ""
-      if (eventType === "session.idle" && cachedTodoEnforcerHook) {
-        const sessionID = event?.properties?.sessionID ?? event?.sessionID ?? ""
-        await cachedTodoEnforcerHook({ ...event, type: "session.idle", sessionID })
+      try {
+        const event = input?.event ?? input
+        const eventType = event?.type ?? event?.payload?.type ?? ""
+        if (eventType === "session.idle" && cachedTodoEnforcerHook) {
+          const sessionID = event?.properties?.sessionID ?? event?.payload?.properties?.sessionID ?? event?.sessionID ?? ""
+          await cachedTodoEnforcerHook({ ...event, type: "session.idle", sessionID })
+        }
+        if (cachedNotifyHook) await cachedNotifyHook(event)
+      } catch (err) {
+        console.error("[powerpack] event hook failed:", err instanceof Error ? err.message : err)
       }
-      if (cachedNotifyHook) await cachedNotifyHook(event)
     }
   }
 
   if (needsSessionPost) {
     hooks["session.post"] = async (input: any) => {
-      const sessionID = input?.sessionID ?? ""
-      const projectPath = await resolveSessionDirectory(ctx, sessionID)
+      try {
+        const sessionID = input?.sessionID ?? ""
+        const projectPath = await resolveSessionDirectory(ctx, sessionID)
 
-      // Quality gate: run validation checks against the session's project
-      if (config.qualityGate.enabled && cachedQualityGateHook) {
-        try {
-          const gateOutput: any = { messages: [] }
-          await cachedQualityGateHook({ directory: projectPath, sessionID }, gateOutput)
-          const injected = gateOutput.messages?.[0]
-          if (injected) {
-            const text = injected.parts?.[0]?.text ?? injected.content ?? ""
-            if (text) console.warn(`[powerpack] ${text}`)
+        // Quality gate: run validation checks against the session's project
+        if (config.qualityGate.enabled && cachedQualityGateHook) {
+          try {
+            const gateOutput: any = { messages: [] }
+            await cachedQualityGateHook({ directory: projectPath, sessionID }, gateOutput)
+            const injected = gateOutput.messages?.[0]
+            if (injected) {
+              const text = injected.parts?.[0]?.text ?? injected.content ?? ""
+              if (text) console.warn(`[powerpack] ${text}`)
+            }
+          } catch (err) {
+            console.error("[powerpack] Quality gate failed:", err instanceof Error ? err.message : err)
           }
-        } catch (err) {
-          console.debug("[powerpack] Quality gate failed:", err instanceof Error ? err.message : err)
         }
-      }
 
-      // Memory auto-capture from the session trajectory
-      if (config.memory.enabled && config.memory.autoCapture) {
-        try {
-          const sessionId = sessionID || "unknown"
-          const messages = (input?.trajectory ?? []).map((m: any) => ({
-            role: m?.role ?? "unknown",
-            content: trajectoryText(m),
-          }))
-          if (messages.length > 0) {
-            const { getMemoryStore } = await import("./memory/store")
-            const { getMemoryDbPath } = await import("./memory/types")
-            const store = getMemoryStore(getMemoryDbPath(projectPath))
-            captureFromSession(store, projectPath, sessionId, messages)
-          }
+        // Memory auto-capture from the session trajectory
+        if (config.memory.enabled && config.memory.autoCapture) {
+          try {
+            const sessionId = sessionID || "unknown"
+            const messages = (input?.trajectory ?? []).map((m: any) => ({
+              role: m?.role ?? "unknown",
+              content: trajectoryText(m),
+            }))
+            if (messages.length > 0) {
+              const { getMemoryStore } = await import("./memory/store")
+              const { getMemoryDbPath } = await import("./memory/types")
+              const store = getMemoryStore(getMemoryDbPath(projectPath))
+              captureFromSession(store, projectPath, sessionId, messages)
+            }
 
-          // Embeddings: initialize and backfill unembedded memories.
-          // NEVER await init/backfill inside the hook — it runs at the end of
-          // every turn, and initEmbeddings downloads the ONNX model from
-          // HuggingFace. On restricted/slow networks that hangs the whole
-          // session forever. Embeddings are opt-in
-          // (config.memory.embeddings.enabled) and initialized fire-and-forget.
-          if (config.memory.embeddings?.enabled) {
-            const model = config.memory.embeddings.model || "onnx-community/granite-embedding-small-english-r2-ONNX"
-            const { getMemoryStore } = await import("./memory/store")
-            const { getMemoryDbPath } = await import("./memory/types")
-            const embedStore = getMemoryStore(getMemoryDbPath(projectPath))
-            import("./memory/embeddings")
-              .then(({ initEmbeddings }) => initEmbeddings(model))
-              .then((ready) => {
-                if (!ready) return
-                return import("./memory/search").then(({ backfillEmbeddings }) =>
-                  backfillEmbeddings(embedStore, projectPath, model),
-                )
-              })
-              .catch(() => {
-                // Embeddings are optional — never let init failures surface
-              })
+            // Embeddings: initialize and backfill unembedded memories.
+            // NEVER await init/backfill inside the hook — it runs at the end of
+            // every turn, and initEmbeddings downloads the ONNX model from
+            // HuggingFace. On restricted/slow networks that hangs the whole
+            // session forever. Embeddings are opt-in
+            // (config.memory.embeddings.enabled) and initialized fire-and-forget.
+            if (config.memory.embeddings?.enabled) {
+              const model = config.memory.embeddings.model || "onnx-community/granite-embedding-small-english-r2-ONNX"
+              const { getMemoryStore } = await import("./memory/store")
+              const { getMemoryDbPath } = await import("./memory/types")
+              const embedStore = getMemoryStore(getMemoryDbPath(projectPath))
+              import("./memory/embeddings")
+                .then(({ initEmbeddings }) => initEmbeddings(model))
+                .then((ready) => {
+                  if (!ready) return
+                  return import("./memory/search").then(({ backfillEmbeddings }) =>
+                    backfillEmbeddings(embedStore, projectPath, model),
+                  )
+                })
+                .catch(() => {
+                  // Embeddings are optional — never let init failures surface
+                })
+            }
+          } catch (err) {
+            // Best-effort: don't break session lifecycle flow
+            console.error("[powerpack] Memory auto-capture failed:", err instanceof Error ? err.message : err)
           }
-        } catch (err) {
-          // Best-effort: don't break session lifecycle flow
-          console.debug("[powerpack] Memory auto-capture failed:", err instanceof Error ? err.message : err)
         }
+      } catch (err) {
+        console.error("[powerpack] session.post hook failed:", err instanceof Error ? err.message : err)
       }
     }
   }

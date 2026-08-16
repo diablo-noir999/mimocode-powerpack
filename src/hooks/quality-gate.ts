@@ -31,21 +31,22 @@ export function createQualityGateHook(config?: { commands?: Array<{ name: string
   const commands = config?.commands ?? DEFAULT_COMMANDS
 
   return async (input: any, output: any) => {
-    if (!input?.directory) return
-
-    const dir = input.directory
-
     try {
-      const status = await new Promise<string>((resolve, reject) => {
-        execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: GIT_STATUS_TIMEOUT_MS }, (err, stdout) => {
-          if (err) reject(err)
-          else resolve(stdout.toString().trim())
+      if (!input?.directory) return
+
+      const dir = input.directory
+
+      try {
+        const status = await new Promise<string>((resolve, reject) => {
+          execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: GIT_STATUS_TIMEOUT_MS }, (err, stdout) => {
+            if (err) reject(err)
+            else resolve(stdout.toString().trim())
+          })
         })
-      })
-      if (!status) return
-    } catch {
-      return
-    }
+        if (!status) return
+      } catch {
+        return
+      }
 
     const runCommand = async ({ name, cmd, timeout }: { name: string; cmd: string; timeout?: number }): Promise<string> => {
       if (/[;&|`$(){}!<>]/.test(cmd)) {
@@ -74,25 +75,28 @@ export function createQualityGateHook(config?: { commands?: Array<{ name: string
 
     // Push a message in the format matching existing messages (or skip if unknown)
     if (Array.isArray(output.messages)) {
-      if (output.messages.length === 0 || isFlatMessage(output.messages[0])) {
-        output.messages.push({
-          role: "system",
-          content: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.`,
-        })
-      } else if (isWithPartsMessage(output.messages[0])) {
-        // WithParts format — push a user message with the gate results
-        output.messages.push({
-          info: {
-            role: "user",
-            id: `quality-gate-${Date.now()}`,
-            sessionID: input.sessionID ?? "",
-            time: { created: Date.now() },
-            agent: "powerpack",
-            model: {},
-          },
-          parts: [{ type: "text", text: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.` }],
-        })
+        if (output.messages.length === 0 || isFlatMessage(output.messages[0])) {
+          output.messages.push({
+            role: "system",
+            content: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.`,
+          })
+        } else if (isWithPartsMessage(output.messages[0])) {
+          // WithParts format — push a user message with the gate results
+          output.messages.push({
+            info: {
+              role: "user",
+              id: `quality-gate-${Date.now()}`,
+              sessionID: input.sessionID ?? "",
+              time: { created: Date.now() },
+              agent: "powerpack",
+              model: {},
+            },
+            parts: [{ type: "text", text: `⚠️ Quality gate failed:\n${summary}\n\nFix the issues above before completing.` }],
+          })
+        }
       }
+    } catch (err) {
+      console.error("[quality-gate] hook failed:", err instanceof Error ? err.message : err)
     }
   }
 }

@@ -46,57 +46,61 @@ function evictStaleSessions(): void {
 
 export function createTodoEnforcerHook(config: TodoEnforcerConfig) {
   return async (event: any) => {
-    if (!config.enabled) return
+    try {
+      if (!config.enabled) return
 
-    evictStaleSessions();
+      evictStaleSessions();
 
-    const eventType = event?.type ?? event?.event?.type ?? ""
-    if (eventType !== "session.idle") return
+      const eventType = event?.type ?? event?.payload?.type ?? event?.event?.type ?? ""
+      if (eventType !== "session.idle") return
 
-    const sessionID = event?.sessionID ?? event?.event?.sessionID ?? ""
-    if (!sessionID) return
+      const sessionID = event?.sessionID ?? event?.properties?.sessionID ?? event?.payload?.properties?.sessionID ?? event?.event?.sessionID ?? ""
+      if (!sessionID) return
 
-    // Get or create session state
-    let state = sessionStates.get(sessionID)
-    if (!state) {
-      state = { failureCount: 0, lastInjection: 0, cooldownUntil: 0 }
-      sessionStates.set(sessionID, state)
+      // Get or create session state
+      let state = sessionStates.get(sessionID)
+      if (!state) {
+        state = { failureCount: 0, lastInjection: 0, cooldownUntil: 0 }
+        sessionStates.set(sessionID, state)
+      }
+
+      // Check cooldown
+      const now = Date.now()
+      if (now < state.cooldownUntil) return
+
+      // Check if there are recent messages suggesting ongoing work.
+      // The event may carry messages from the session — if the last user message
+      // is older than 5 minutes or there are no messages, treat as idle (no
+      // incomplete work detected).
+      const messages = event?.messages ?? event?.event?.messages ?? []
+      const lastUserMsg = messages.findLast?.((m: any) => m?.role === "user")
+      const lastTimestamp = lastUserMsg?.timestamp ?? lastUserMsg?.createdAt ?? 0
+      const hasIncompleteTasks = lastTimestamp > 0 && (now - lastTimestamp) < 300_000
+
+      if (!hasIncompleteTasks) {
+        // Reset on clean idle (no incomplete tasks detected)
+        state.failureCount = 0
+        return
+      }
+
+      // Check if we've hit max consecutive failures
+      if (state.failureCount >= (config.maxFailures ?? MAX_CONSECUTIVE_FAILURES)) {
+        // Exponential backoff
+        const backoffMs = COOLDOWN_MS * Math.pow(EXPONENTIAL_BACKOFF_BASE, state.failureCount - config.maxFailures)
+        state.cooldownUntil = now + Math.min(backoffMs, 300000) // Max 5 min cooldown
+        return
+      }
+
+      // Inject continuation prompt
+      state.failureCount++
+      state.lastInjection = now
+
+      // Set cooldown
+      state.cooldownUntil = now + (config.cooldownMs ?? COOLDOWN_MS)
+
+      // TODO: Deliver CONTINUATION_PROMPT via the session API
+    } catch (err) {
+      console.error("[todo-enforcer] hook failed:", err instanceof Error ? err.message : err)
     }
-
-    // Check cooldown
-    const now = Date.now()
-    if (now < state.cooldownUntil) return
-
-    // Check if there are recent messages suggesting ongoing work.
-    // The event may carry messages from the session — if the last user message
-    // is older than 5 minutes or there are no messages, treat as idle (no
-    // incomplete work detected).
-    const messages = event?.messages ?? event?.event?.messages ?? []
-    const lastUserMsg = messages.findLast?.((m: any) => m?.role === "user")
-    const lastTimestamp = lastUserMsg?.timestamp ?? lastUserMsg?.createdAt ?? 0
-    const hasIncompleteTasks = lastTimestamp > 0 && (now - lastTimestamp) < 300_000
-
-    if (!hasIncompleteTasks) {
-      // Reset on clean idle (no incomplete tasks detected)
-      state.failureCount = 0
-      return
-    }
-
-    // Check if we've hit max consecutive failures
-    if (state.failureCount >= (config.maxFailures ?? MAX_CONSECUTIVE_FAILURES)) {
-      // Exponential backoff
-      const backoffMs = COOLDOWN_MS * Math.pow(EXPONENTIAL_BACKOFF_BASE, state.failureCount - config.maxFailures)
-      state.cooldownUntil = now + Math.min(backoffMs, 300000) // Max 5 min cooldown
-      return
-    }
-
-    // Inject continuation prompt
-    state.failureCount++
-    state.lastInjection = now
-
-    // Set cooldown
-    state.cooldownUntil = now + (config.cooldownMs ?? COOLDOWN_MS)
-
-    // TODO: Deliver CONTINUATION_PROMPT via the session API
   }
 }

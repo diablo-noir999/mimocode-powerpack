@@ -21,7 +21,10 @@ export function estimateTextTokens(text: string): number {
  * Estimate the total tokens consumed by a message.
  *
  * Handles both flat `content` strings and the `parts[]` array format
- * used by the SDK. Returns 0 for messages with no recognisable content.
+ * used by the SDK. Tool-bearing parts (tool-call input objects, tool
+ * results, error strings) are always counted so they carry nonzero
+ * weight and never become prime drop candidates. Returns 0 for messages
+ * with no recognisable content.
  */
 export function estimateMessageTokens(message: any): number {
   // Flat string content
@@ -36,13 +39,44 @@ export function estimateMessageTokens(message: any): number {
       if (!isRecord(part)) continue
       if (typeof part.text === "string") total += estimateTextTokens(part.text)
       if (typeof part.thinking === "string") total += estimateTextTokens(part.thinking)
-      if (isRecord(part.state) && typeof part.state.output === "string") {
-        total += estimateTextTokens(part.state.output)
-      }
       if (typeof part.content === "string") total += estimateTextTokens(part.content)
+      if (typeof part.error === "string") total += estimateTextTokens(part.error)
+      if (isRecord(part.state)) {
+        // Tool results: string output, or object output serialized
+        if (typeof part.state.output === "string") {
+          total += estimateTextTokens(part.state.output)
+        } else if (part.state.output !== undefined && part.state.output !== null) {
+          total += estimateTextTokens(safeStringify(part.state.output))
+        }
+        // Tool-call input: always counted (object or string) so tool-bearing
+        // messages have nonzero weight
+        if (part.state.input !== undefined && part.state.input !== null) {
+          if (typeof part.state.input === "string") {
+            total += estimateTextTokens(part.state.input)
+          } else {
+            total += estimateTextTokens(safeStringify(part.state.input))
+          }
+        }
+        // Error state
+        if (typeof part.state.error === "string") {
+          total += estimateTextTokens(part.state.error)
+        }
+      }
     }
     return total
   }
 
   return 0
+}
+
+/**
+ * JSON.stringify that never throws (e.g. circular references).
+ * Returns "" on failure so token estimation stays pure and fast.
+ */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return ""
+  }
 }

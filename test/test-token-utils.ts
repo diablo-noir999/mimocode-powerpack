@@ -173,6 +173,52 @@ section("estimateMessageTokens")
   assertEq(r, 0, "non-record parts skipped")
 }
 
+section("estimateMessageTokens - tool parts always have nonzero weight")
+
+// Test: tool-call input object is counted (never scores 0)
+{
+  const r = estimateMessageTokens({
+    role: "assistant",
+    parts: [
+      { type: "tool", tool: "bash", callID: "call_1", state: { status: "pending", input: { command: "ls -la" } } },
+    ],
+  })
+  assert(r > 0, `tool-call input object counted (got ${r})`)
+}
+
+// Test: error state string is counted
+{
+  const r = estimateMessageTokens({
+    role: "assistant",
+    parts: [
+      { type: "tool", tool: "bash", callID: "call_1", state: { status: "error", input: {}, error: "command not found: ls" } },
+    ],
+  })
+  assert(r > 0, `error state string counted (got ${r})`)
+}
+
+// Test: object tool result (state.output object) is counted
+{
+  const r = estimateMessageTokens({
+    role: "assistant",
+    parts: [
+      { type: "tool", tool: "bash", callID: "call_1", state: { status: "completed", input: { command: "ls" }, output: { files: ["a.ts", "b.ts"] } } },
+    ],
+  })
+  assert(r > 0, `object tool result counted (got ${r})`)
+}
+
+// Test: tool message with empty-string input/output still has nonzero weight (input object serializes)
+{
+  const r = estimateMessageTokens({
+    role: "assistant",
+    parts: [
+      { type: "tool", tool: "edit", callID: "call_1", state: { status: "completed", input: {}, output: "" } },
+    ],
+  })
+  assert(r > 0, `tool message with empty state never scores 0 (got ${r})`)
+}
+
 // ============================================================
 // === Summary ===
 // ============================================================

@@ -362,20 +362,24 @@ function stripCmdW(tokens: string[]): string[] {
 
 export function createSafetyNetHook() {
   return async (input: any, output: any) => {
-    if (input.tool !== "bash") return
-    const args = output?.args
-    const command = args?.command
-    if (typeof command !== "string" || !command.trim()) return
-    const cwd = input.directory ?? process.cwd()
-    const result = analyzeCommand(command, cwd)
-    if (result) {
-      // tool.execute.before output contract: { args, cancel?, cancelReason? }.
-      // Setting cancel=true is what actually stops the tool call; content is
-      // informational only.
-      output.cancel = true
-      output.cancelReason = result.reason
-      output.content = (output.content ? output.content + "\n" : "") + `[Safety Net] Blocked: ${result.reason}\nSegment: ${result.segment}`
-      output.modified = true
+    try {
+      if (input.tool !== "bash") return
+      const args = output?.args
+      const command = args?.command
+      if (typeof command !== "string" || !command.trim()) return
+      const cwd = input.directory ?? process.cwd()
+      const result = analyzeCommand(command, cwd)
+      if (result) {
+        // tool.execute.before output contract: { args, cancel?, cancelReason? }.
+        // Setting cancel=true is what actually stops the tool call; content is
+        // informational only.
+        output.cancel = true
+        output.cancelReason = result.reason
+        output.content = (output.content ? output.content + "\n" : "") + `[Safety Net] Blocked: ${result.reason}\nSegment: ${result.segment}`
+        output.modified = true
+      }
+    } catch (err) {
+      console.error("[safety-net] hook failed:", err instanceof Error ? err.message : err)
     }
   }
 }

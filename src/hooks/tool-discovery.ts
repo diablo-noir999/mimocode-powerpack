@@ -14,7 +14,11 @@ import type { HookInput, HookOutput } from "../types"
 
 export function createToolDiscoveryHook() {
   return async (_input: HookInput, _output: HookOutput) => {
-    // DISABLED: Flat message injection is incompatible with MiMo-Code v0.1.7+.
-    // System-level tool discovery should use the system.transform hook instead.
+    try {
+      // DISABLED: Flat message injection is incompatible with MiMo-Code v0.1.7+.
+      // System-level tool discovery should use the system.transform hook instead.
+    } catch (err) {
+      console.error("[tool-discovery] hook failed:", err instanceof Error ? err.message : err)
+    }
   }
 }

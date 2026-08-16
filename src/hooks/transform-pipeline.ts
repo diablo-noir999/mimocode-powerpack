@@ -202,10 +202,14 @@ export function runTransformPipeline(
 
   // Run stages in order: facts first (on original messages), then drops,
   // then cache layout (classification only), then brain loader (first message only).
-  runSessionFactsExtraction(ctx)
-  runSmartDrops(ctx)
-  runCacheLayout(ctx)
-  runBrainLoader(ctx)
+  try {
+    runSessionFactsExtraction(ctx)
+    runSmartDrops(ctx)
+    runCacheLayout(ctx)
+    runBrainLoader(ctx)
+  } catch {
+    // Best-effort: a failing stage must never propagate out of the pipeline
+  }
 
   ctx.stats.finalCount = messages.length
   return ctx.stats
@@ -220,14 +224,21 @@ export function createTransformPipelineHook(
   config: TransformPipelineConfig = DEFAULT_TRANSFORM_CONFIG,
 ) {
   return async (input: any, output: any): Promise<void> => {
-    if (!output?.messages || !Array.isArray(output.messages)) return
-    if (!config.enabled) return
+    try {
+      if (!output?.messages || !Array.isArray(output.messages)) return
+      if (!config.enabled) return
 
-    const messages = output.messages
-    const sessionId = extractSessionId(messages)
+      const messages = output.messages
+      const sessionId = extractSessionId(messages)
 
-    const effectiveProjectPath = input?.directory ?? input?.worktree ?? (projectPath || process.cwd())
-    runTransformPipeline(messages, sessionId, effectiveProjectPath, config)
+      const effectiveProjectPath = input?.directory ?? input?.worktree ?? (projectPath || process.cwd())
+      runTransformPipeline(messages, sessionId, effectiveProjectPath, config)
+    } catch (err) {
+      // A transform hook throw fails the whole LLM step in MiMoCode's run
+      // loop (no timeout, no catch). NEVER let an error escape here — the
+      // input/output must remain unchanged.
+      console.error("[transform-pipeline] hook failed:", err instanceof Error ? err.message : err)
+    }
   }
 }
 

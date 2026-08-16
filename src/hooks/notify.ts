@@ -12,7 +12,7 @@
  */
 
 import { platform } from "os"
-import { execFileSync } from "child_process"
+import { spawn } from "child_process"
 
 interface NotifyConfig {
   enabled: boolean
@@ -39,25 +39,47 @@ export function createNotifyHook(config: NotifyConfig) {
   const maxLen = config.maxMessageLength ?? 100
 
   return async (event: any) => {
-    if (!config.enabled) return
+    try {
+      if (!config.enabled) return
 
-    // Check quiet hours
-    if (config.quietHours && isQuietHours(config.quietHours)) return
+      // Check quiet hours
+      if (config.quietHours && isQuietHours(config.quietHours)) return
 
-    const eventType = event?.type ?? event?.event?.type ?? ""
-    const format = EVENT_FORMAT[eventType]
-    if (!format) return
+      // MiMoCode v0.1.7+ delivers { event: Event } where
+      // EventSessionIdle = { type, properties: { sessionID } }; some runtimes
+      // wrap further ({ directory, project, workspace, payload }). Unwrap to
+      // the innermost object that actually carries { type, ... }.
+      const evt = eventData(event)
+      const eventType = evt?.type ?? ""
+      const format = EVENT_FORMAT[eventType]
+      if (!format) return
 
-    // Skip child sessions unless configured
-    if (config.notifyChildSessions === false && event?.parentSessionID) return
+      // Skip child sessions unless configured
+      if (config.notifyChildSessions === false && evt?.parentSessionID) return
 
-    // Build notification content
-    const title = `${format.icon} ${format.titlePrefix}`
-    let body = buildBody(event, eventType, showMessage, maxLen)
+      // Build notification content
+      const title = `${format.icon} ${format.titlePrefix}`
+      const body = buildBody(evt, eventType, showMessage, maxLen)
 
-    // Send native notification
-    await sendNativeNotification(title, body)
+      // Send native notification — non-blocking fire-and-forget, never throws
+      sendNativeNotification(title, body)
+    } catch (err) {
+      console.error("[notify] hook failed:", err instanceof Error ? err.message : err)
+    }
   }
+}
+
+/**
+ * Unwrap the event envelope to the innermost object carrying { type, ... }.
+ * Handles bare events ({ type, properties }), the MiMoCode hook input
+ * ({ event: Event }), and payload-wrapped shapes
+ * ({ directory, project, workspace, payload: Event }).
+ */
+function eventData(event: any): any {
+  if (event?.type) return event
+  if (event?.event?.type) return event.event
+  if (event?.payload?.type) return event.payload
+  return event
 }
 
 function buildBody(event: any, eventType: string, showMessage: boolean, maxLen: number): string {
@@ -143,36 +165,46 @@ function escapePowerShell(s: string): string {
   return s.replace(/'/g, "''")
 }
 
-async function sendNativeNotification(title: string, body: string): Promise<void> {
+/**
+ * Send a native OS notification without ever blocking the event loop.
+ * Detached, unref'd, fire-and-forget — never awaited, never throws.
+ */
+function sendNativeNotification(title: string, body: string): void {
   const os = platform()
 
   try {
     if (os === "darwin") {
-      // macOS: use alerter if available, fall back to osascript
-      try {
-        execFileSync("alerter", ["-title", title, "-message", body, "-ignoreProfile"], {
-          timeout: 5000,
-          stdio: "ignore",
-        })
-      } catch {
-        execFileSync(
-          "osascript",
-          ["-e", `display notification "${escapeAppleScript(body)}" with title "${escapeAppleScript(title)}" sound name "default"`],
-          { timeout: 5000, stdio: "ignore" }
-        )
-      }
-    } else if (os === "linux") {
-      execFileSync("notify-send", ["-u", "normal", title, body], {
-        timeout: 5000,
+      // macOS: prefer alerter; fall back to osascript on failure
+      const alerter = spawn("alerter", ["-title", title, "-message", body, "-ignoreProfile"], {
+        detached: true,
         stdio: "ignore",
       })
+      alerter.unref()
+      alerter.on("error", () => {
+        const osa = spawn(
+          "osascript",
+          ["-e", `display notification "${escapeAppleScript(body)}" with title "${escapeAppleScript(title)}" sound name "default"`],
+          { detached: true, stdio: "ignore" }
+        )
+        osa.unref()
+        osa.on("error", () => {})
+      })
+    } else if (os === "linux") {
+      const child = spawn("notify-send", ["-u", "normal", title, body], {
+        detached: true,
+        stdio: "ignore",
+      })
+      child.unref()
+      child.on("error", () => {})
     } else if (os === "win32") {
       // Windows: use PowerShell toast notification
-      execFileSync(
+      const child = spawn(
         "powershell",
         ["-Command", `New-BurntToastNotification -Text '${escapePowerShell(title)}','${escapePowerShell(body)}'`],
-        { timeout: 5000, stdio: "ignore" }
+        { detached: true, stdio: "ignore" }
       )
+      child.unref()
+      child.on("error", () => {})
     }
   } catch {
     // Notification failed silently — don't crash the plugin

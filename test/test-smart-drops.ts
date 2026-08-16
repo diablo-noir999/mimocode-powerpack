@@ -148,6 +148,79 @@ section("findDropCandidates - low-value messages")
   assert(placeholders.length > 0, "dropped placeholder detected")
 }
 
+section("findDropCandidates - tool-bearing / WithParts messages are NEVER dropped")
+
+// Test: WithParts user message (no flat role) is never a low-value candidate
+{
+  const msgs = [
+    { role: "user", content: "hello" },
+    { info: { role: "user", id: "m1" }, parts: [{ type: "text", text: "" }] },
+    { info: { role: "assistant", id: "m2" }, parts: [{ type: "text", text: "" }] },
+  ]
+  const r = findDropCandidates(msgs, { ...DEFAULT_DROP_CONFIG, dropLowValue: true, minTokenSavings: 0 })
+  const lowValue = r.candidates.filter(c => c.category === "low-value-message" || c.category === "dropped-placeholder")
+  assertEq(lowValue.length, 0, "WithParts messages (no flat .role) are never low-value drop candidates")
+}
+
+// Test: message with an in-flight tool part (pending state) is never dropped
+{
+  const msgs = [
+    { role: "user", content: "hello" },
+    {
+      info: { role: "assistant", id: "m1" },
+      parts: [
+        { type: "tool", tool: "bash", callID: "call_1", state: { status: "pending", input: { command: "ls" } } },
+      ],
+    },
+  ]
+  const r = findDropCandidates(msgs, { ...DEFAULT_DROP_CONFIG, dropLowValue: true, minTokenSavings: 0 })
+  const candidates = r.candidates.filter(c => c.category === "low-value-message" || c.category === "dropped-placeholder")
+  assertEq(candidates.length, 0, "message with pending tool part is never a drop candidate")
+}
+
+// Test: message with a completed tool result part is never dropped
+{
+  const msgs = [
+    { role: "user", content: "hello" },
+    {
+      info: { role: "assistant", id: "m1" },
+      parts: [
+        { type: "tool", tool: "bash", callID: "call_1", state: { status: "completed", input: { command: "ls" }, output: "file1\nfile2" } },
+      ],
+    },
+  ]
+  const r = findDropCandidates(msgs, { ...DEFAULT_DROP_CONFIG, dropLowValue: true, minTokenSavings: 0 })
+  const candidates = r.candidates.filter(c => c.category === "low-value-message" || c.category === "dropped-placeholder")
+  assertEq(candidates.length, 0, "message with tool result part is never a drop candidate")
+}
+
+// Test: WithParts ctx_reduce tool call is not a stale-reduce drop candidate
+{
+  const msgs = [
+    {
+      info: { role: "assistant", id: "m1" },
+      parts: [
+        { type: "tool", tool: "ctx_reduce", callID: "call_1", state: { status: "completed", input: { n: 5 } } },
+      ],
+    },
+    ...Array.from({ length: 10 }, (_, i) => ({ role: "user", content: `msg ${i}` })),
+  ]
+  const r = findDropCandidates(msgs, { ...DEFAULT_DROP_CONFIG, dropStaleReduceCalls: true, minTokenSavings: 0 })
+  const stale = r.candidates.filter(c => c.category === "stale-reduce-call")
+  assertEq(stale.length, 0, "WithParts ctx_reduce tool message is never a stale-reduce drop candidate")
+}
+
+// Test: flat stale reduce call with no tool parts is still a candidate
+{
+  const msgs = [
+    { role: "tool", name: "ctx_reduce", content: "reduced" },
+    ...Array.from({ length: 10 }, (_, i) => ({ role: "user", content: `msg ${i}` })),
+  ]
+  const r = findDropCandidates(msgs, { ...DEFAULT_DROP_CONFIG, dropStaleReduceCalls: true, minTokenSavings: 0 })
+  const stale = r.candidates.filter(c => c.category === "stale-reduce-call")
+  assert(stale.length > 0, "flat ctx_reduce call is still detected as stale")
+}
+
 section("findDropCandidates - stale reduce calls")
 
 // Test: old ctx_reduce call is candidate
@@ -254,6 +327,26 @@ section("applyDrops")
   assertEq(applied, 2, "multiple drops applied")
   assert(msgs[1].content.includes("superseded-edit"), "first drop applied")
   assert(msgs[2].content.includes("spent-tool-output"), "second drop applied")
+}
+
+// Test: applyDrops never transforms a message containing tool parts
+{
+  const msgs = [
+    { role: "user", content: "hello" },
+    {
+      info: { role: "assistant", id: "m1" },
+      parts: [
+        { type: "tool", tool: "bash", callID: "call_1", state: { status: "pending", input: { command: "ls" } } },
+      ],
+    },
+  ]
+  const before = JSON.stringify(msgs[1])
+  const applied = applyDrops(msgs, [
+    { index: 1, category: "low-value-message", reason: "empty", estimatedTokens: 0 },
+  ])
+  assertEq(applied, 0, "applyDrops refuses to touch tool-bearing messages")
+  assertEq(JSON.stringify(msgs[1]), before, "tool-bearing message left completely unchanged")
+  assertEq(msgs[1].parts[0].state.input.command, "ls", "in-flight tool input preserved")
 }
 
 // ============================================================

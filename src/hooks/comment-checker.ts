@@ -64,36 +64,40 @@ const COMBINED_SLOP_DETECT = new RegExp(
 
 export function createCommentCheckerHook() {
   return async (input: HookInput, output: any) => {
-    if (input.tool !== "edit") return
+    try {
+      if (input.tool !== "edit") return
 
-    // tool.execute.after output contract: { title, output, metadata }.
-    // Fall back to output.content for other hook contexts.
-    const target = output?.output ?? output?.content
-    if (typeof target !== "string") return
+      // tool.execute.after output contract: { title, output, metadata }.
+      // Fall back to output.content for other hook contexts.
+      const target = output?.output ?? output?.content
+      if (typeof target !== "string") return
 
-    const content = target
-    const issues: string[] = []
+      const content = target
+      const issues: string[] = []
 
-    // Phase 1: Fast one-pass detection with combined regex
-    COMBINED_SLOP_DETECT.lastIndex = 0
-    if (!COMBINED_SLOP_DETECT.test(content)) return
+      // Phase 1: Fast one-pass detection with combined regex
+      COMBINED_SLOP_DETECT.lastIndex = 0
+      if (!COMBINED_SLOP_DETECT.test(content)) return
 
-    // Phase 2: Only iterate individual patterns when we know there's a match
-    for (const { pattern, name } of AI_SLOP_PATTERNS) {
-      if (pattern.test(content)) {
-        issues.push(name)
+      // Phase 2: Only iterate individual patterns when we know there's a match
+      for (const { pattern, name } of AI_SLOP_PATTERNS) {
+        if (pattern.test(content)) {
+          issues.push(name)
+        }
+        pattern.lastIndex = 0 // Reset regex state
       }
-      pattern.lastIndex = 0 // Reset regex state
-    }
 
-    if (issues.length > 0) {
-      // Add a warning to the output
-      const warning = `\n\n⚠️ Comment Checker: Detected AI slop patterns: ${issues.join(", ")}. Consider removing these for cleaner comments.`
-      if (typeof output.output === "string") {
-        output.output = content + warning
-      } else if (typeof output.content === "string") {
-        output.content = content + warning
+      if (issues.length > 0) {
+        // Add a warning to the output
+        const warning = `\n\n⚠️ Comment Checker: Detected AI slop patterns: ${issues.join(", ")}. Consider removing these for cleaner comments.`
+        if (typeof output.output === "string") {
+          output.output = content + warning
+        } else if (typeof output.content === "string") {
+          output.content = content + warning
+        }
       }
+    } catch (err) {
+      console.error("[comment-checker] hook failed:", err instanceof Error ? err.message : err)
     }
   }
 }
