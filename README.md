@@ -91,7 +91,6 @@ If you prefer to configure manually, add this to the `plugin` array of `~/.confi
     "notify": { "enabled": true, "quietHours": { "start": "22:00", "end": "08:00" } },
     "todoEnforcer": { "enabled": false, "maxFailures": 5, "cooldownMs": 30000 },
     "commentChecker": { "enabled": true },
-    "qualityGate": { "enabled": false },
     "safetyNet": { "enabled": true },
     "toolDiscovery": { "enabled": true },
     "memory": {
@@ -121,7 +120,6 @@ All options live in the `powerpack` section of the plugin entry:
 | `todoEnforcer.maxFailures` | `5` | Max idle cycles before stop |
 | `todoEnforcer.cooldownMs` | `30000` | Cooldown between idle checks |
 | `commentChecker.enabled` | `true` | AI slop detection on tool output |
-| `qualityGate.enabled` | `false` | Session-level checks |
 | `safetyNet.enabled` | `true` | Destructive-command blocking |
 | `toolDiscovery.enabled` | `true` | No-op on v0.1.7+ (message-format mismatch) |
 | `memory.enabled` | `true` | Memory store + search tools |
@@ -166,7 +164,7 @@ src/
 ├── agents/              # 7 subagent definitions (.md)
 ├── memory/              # store, search, embeddings, knowledge-graph, decay,
 │                        # code-index, session-cache, ...
-├── hooks/               # 6 hooks (safety-net, comment-checker, notify, ...)
+├── hooks/               # 5 hooks (safety-net, comment-checker, notify, ...)
 ├── tools/               # context-analysis, memory-search, memory-write, actor-guide
 └── skills/              # installer, syncer, yaml, metadata, usage tracking
 modes/ultracode.md       # Ultracode primary mode

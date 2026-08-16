@@ -24,7 +24,6 @@ import { captureFromSession } from "./memory/hooks"
 import { createTodoEnforcerHook } from "./hooks/todo-enforcer"
 import { createCommentCheckerHook } from "./hooks/comment-checker"
 import { createNotifyHook } from "./hooks/notify"
-import { createQualityGateHook } from "./hooks/quality-gate"
 import { createToolDiscoveryHook } from "./hooks/tool-discovery"
 import { createSafetyNetHook } from "./hooks/safety-net"
 
@@ -42,9 +41,6 @@ export interface PowerpackOptions {
     cooldownMs?: number
   }
   commentChecker?: {
-    enabled?: boolean
-  }
-  qualityGate?: {
     enabled?: boolean
   }
   safetyNet?: {
@@ -66,7 +62,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
     notify: { enabled: true, quietHours: { start: "22:00", end: "08:00" } },
     todoEnforcer: { enabled: false, maxFailures: 5, cooldownMs: 30000 },
     commentChecker: { enabled: true },
-    qualityGate: { enabled: false },
     safetyNet: { enabled: true },
     toolDiscovery: { enabled: true },
     memory: { enabled: true, autoCapture: true, embeddings: { enabled: false, model: "onnx-community/granite-embedding-small-english-r2-ONNX" } },
@@ -87,7 +82,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   // Cache hook instances at init (avoids re-creating on every message)
   const cachedCommentHook = config.commentChecker.enabled ? createCommentCheckerHook() : null
   const cachedTodoEnforcerHook = config.todoEnforcer.enabled ? createTodoEnforcerHook(config.todoEnforcer as { enabled: boolean; maxFailures: number; cooldownMs: number }) : null
-  const cachedQualityGateHook = config.qualityGate.enabled ? createQualityGateHook() : null
   const cachedToolDiscoveryHook = config.toolDiscovery.enabled ? createToolDiscoveryHook() : null
   const cachedSafetyNetHook = config.safetyNet.enabled ? createSafetyNetHook() : null
   const cachedNotifyHook = config.notify.enabled ? createNotifyHook(config.notify as { enabled: boolean; quietHours?: { start: string; end: string } }) : null
@@ -137,14 +131,13 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   // Session-lifecycle features. NOTE: "session.idle" is an EVENT
   // (EventSessionIdle) in MiMo-Code v0.1.7+ — hooks["session.idle"] never
   // fires. Event consumers (todo enforcer, notify) go through hooks.event;
-  // lifecycle work (quality gate, memory auto-capture) goes through session.post
+  // lifecycle work (memory auto-capture) goes through session.post
   // which fires when the run loop finishes with trajectory + outcome.
 
   // Todo enforcer: idle detection + continuation (session.idle event)
-  // Quality gate: run validation checks when a session completes
   // Memory auto-capture: extract memories from completed sessions
   const needsEventHook = config.notify.enabled || config.todoEnforcer.enabled
-  const needsSessionPost = config.qualityGate.enabled || (config.memory.enabled && config.memory.autoCapture)
+  const needsSessionPost = config.memory.enabled && config.memory.autoCapture
 
   if (needsEventHook) {
     hooks.event = async (input: any) => {
@@ -167,21 +160,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
       try {
         const sessionID = input?.sessionID ?? ""
         const projectPath = await resolveSessionDirectory(ctx, sessionID)
-
-        // Quality gate: run validation checks against the session's project
-        if (config.qualityGate.enabled && cachedQualityGateHook) {
-          try {
-            const gateOutput: any = { messages: [] }
-            await cachedQualityGateHook({ directory: projectPath, sessionID }, gateOutput)
-            const injected = gateOutput.messages?.[0]
-            if (injected) {
-              const text = injected.parts?.[0]?.text ?? injected.content ?? ""
-              if (text) console.warn(`[powerpack] ${text}`)
-            }
-          } catch (err) {
-            console.error("[powerpack] Quality gate failed:", err instanceof Error ? err.message : err)
-          }
-        }
 
         // Memory auto-capture from the session trajectory
         if (config.memory.enabled && config.memory.autoCapture) {

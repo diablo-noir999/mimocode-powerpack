@@ -1,7 +1,7 @@
 /**
  * Test: Hooks + Utility Modules
  * Covers: comment-checker, notify, todo-enforcer, memory-utils, message-utils,
- *         safety-net, tool-discovery, quality-gate, server plugin wiring
+ *         safety-net, tool-discovery, server plugin wiring
  * Run: bun run test/test-hooks.ts
  */
 
@@ -544,7 +544,7 @@ const { default: powerpackModule } = await import("../src/server")
 
   assert(hooks["session.idle"] === undefined, "server does NOT register hooks['session.idle'] (dead hook)")
   assert(typeof hooks.event === "function", "server registers hooks.event (session.idle events + notify)")
-  assert(typeof hooks["session.post"] === "function", "server registers hooks['session.post'] (auto-capture + quality gate)")
+  assert(typeof hooks["session.post"] === "function", "server registers hooks['session.post'] (memory auto-capture)")
 
   const tools = (hooks as any).tool ?? {}
   assert(typeof tools.memory_search?.execute === "function", "server registers memory_search tool by default")

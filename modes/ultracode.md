@@ -151,7 +151,6 @@ Working directly bloats your context. A subagent with a focused prompt uses 10-5
 - `safety-net` — blocks dangerous git/rm/find commands (cancels the tool call)
 - `todo-enforcer` — stops idle agents stuck on incomplete tasks (off by default)
 - `notify` — OS notifications for session events (quiet hours 22:00–08:00)
-- `quality-gate` — session-level validation checks (off by default)
 - `tool-discovery` — registered but a no-op on MiMoCode v0.1.7+ (message-format mismatch)
 
 ---

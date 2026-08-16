@@ -182,7 +182,6 @@ Load with `skill("name")`. Match skill to stage.
 - `safety-net` — blocks dangerous git/rm/find commands (cancels the tool call)
 - `todo-enforcer` — stops idle agents stuck on incomplete tasks
 - `notify` — OS notifications for session events (quiet hours 22:00-08:00)
-- `quality-gate` — session-level checks (off by default)
 - `tool-discovery` — registered but a no-op on MiMoCode v0.1.7+ (message-format mismatch)
 
 ---
@@ -199,7 +198,7 @@ The plugin ships 7 test suites under `test/`. Run `bun run test/run-all.ts` for 
 **Test structure:** Each suite uses a flat assert/assertEq pattern (no test framework). Sections group related tests. Exit code 0 = pass, 1 = fail.
 
 **Key test files:**
-- `test-hooks.ts` — hooks (comment-checker, notify, todo-enforcer, safety-net, tool-discovery, quality-gate) + memory-utils, message-utils, server plugin wiring
+- `test-hooks.ts` — hooks (comment-checker, notify, todo-enforcer, safety-net, tool-discovery) + memory-utils, message-utils, server plugin wiring
 - `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF/hybrid/graph), decay math, batch ops, typed payloads, feedback-weighted search, legacy schema migration
 - `test-knowledge-graph.ts` — KnowledgeGraph node/edge CRUD, k-hop traversal, FTS search, subgraph extraction, stats
 - `test-token-utils.ts` — token estimation for text and messages
