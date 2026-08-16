@@ -656,6 +656,8 @@ function closeAllIndexers(): void {
   _instances.clear();
 }
 
-process.on("exit", closeAllIndexers);
-process.on("SIGINT", () => { closeAllIndexers(); process.exit(0); });
-process.on("SIGTERM", () => { closeAllIndexers(); process.exit(0); });
+if (import.meta.main) {
+  process.on("exit", closeAllIndexers);
+  process.on("SIGINT", () => { closeAllIndexers(); process.exit(0); });
+  process.on("SIGTERM", () => { closeAllIndexers(); process.exit(0); });
+}

@@ -8,6 +8,8 @@
 
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   type Memory,
   type MemoryCategory,
@@ -154,6 +156,7 @@ export class MemoryStore {
 
 
   constructor(dbPath: string) {
+    mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
@@ -427,6 +430,8 @@ function closeAllStores(): void {
   _instances.clear();
 }
 
-process.on("exit", closeAllStores);
-process.on("SIGINT", () => { closeAllStores(); process.exit(0); });
-process.on("SIGTERM", () => { closeAllStores(); process.exit(0); });
+if (import.meta.main) {
+  process.on("exit", closeAllStores);
+  process.on("SIGINT", () => { closeAllStores(); process.exit(0); });
+  process.on("SIGTERM", () => { closeAllStores(); process.exit(0); });
+}
