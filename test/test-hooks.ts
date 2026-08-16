@@ -1,7 +1,7 @@
 /**
  * Test: Hooks + Utility Modules
- * Covers: dedup-prune, error-prune, comment-checker, transform-pipeline, notify,
- *         todo-enforcer, memory-utils, message-utils, tool-discovery
+ * Covers: comment-checker, notify, todo-enforcer, memory-utils, message-utils,
+ *         safety-net, tool-discovery, quality-gate, server plugin wiring
  * Run: bun run test/test-hooks.ts
  */
 
@@ -34,146 +34,6 @@ function assertMatch(a: string, pattern: RegExp, msg: string) {
 
 function section(name: string) {
   console.log(`\n--- ${name} ---`)
-}
-
-// === Dedup Prune Hook ===
-section("Dedup Prune Hook")
-const { createDedupPruneHook } = await import("../src/hooks/dedup-prune")
-const dedupHook = createDedupPruneHook()
-
-// Helper: create a minimal WithParts-format user message
-function wpUser(text: string): any {
-  return { info: { role: "user", id: `u-${Math.random()}`, sessionID: "s", time: { created: 0 }, agent: "a", model: {} }, parts: [{ type: "text" as const, text }] }
-}
-
-// Helper: create a minimal WithParts-format assistant message with optional tool parts
-function wpAsst(text: string, tools?: any[]): any {
-  const parts: any[] = [{ type: "text" as const, text }]
-  if (tools) parts.push(...tools)
-  return { info: { role: "assistant", id: `a-${Math.random()}`, sessionID: "s", time: { created: 0 }, model: {} }, parts }
-}
-
-// Minimal completed tool part for dedup tests
-function completedTool(callID: string, tool: string, input: any, output: string): any {
-  return { type: "tool" as const, callID, tool, state: { status: "completed" as const, input, output, title: tool, metadata: {}, time: { start: 0, end: 1 } } }
-}
-
-// Test: removes duplicate tool calls
-{
-  const input = {
-    messages: [
-      wpUser("hello"),
-      wpAsst("hi", [completedTool("c1", "read", { file_path: "/a" }, "file a")]),
-      wpUser("again"),
-      wpAsst("ok", [completedTool("c2", "read", { file_path: "/a" }, "file a again")]),
-    ],
-  }
-  const output = { messages: structuredClone(input.messages) }
-  await dedupHook(input, output)
-  // The dedup hook should clear the older duplicate's output
-  const olderParts = output.messages[1].parts
-  const prunedTool = olderParts.find((p: any) => p.type === "tool" && p.state?.output === "[Duplicate tool output pruned]")
-  assert(prunedTool !== undefined, "dedup clears the older duplicate's tool output")
-  assertEq(output.messages.length, input.messages.length, "dedup preserves message count")
-}
-
-// Test: no duplicates = no change
-{
-  const input = {
-    messages: [
-      wpUser("hello"),
-      wpAsst("hi", [completedTool("c1", "read", { file_path: "/a" }, "file a")]),
-    ],
-  }
-  const output = { messages: structuredClone(input.messages) }
-  await dedupHook(input, output)
-  assertEq(output.messages.length, 2, "dedup: no change when no duplicates")
-}
-
-// Test: three-way duplicate only prunes the oldest pair
-{
-  const input = {
-    messages: [
-      wpAsst("first", [completedTool("c1", "read", { file_path: "/x" }, "x1")]),
-      wpAsst("second", [completedTool("c2", "read", { file_path: "/x" }, "x2")]),
-      wpAsst("third", [completedTool("c3", "read", { file_path: "/x" }, "x3")]),
-    ],
-  }
-  const output = { messages: structuredClone(input.messages) }
-  await dedupHook(input, output)
-  const prunedCount = output.messages.filter((m: any) =>
-    m.parts?.some((p: any) => p.type === "tool" && p.state?.output === "[Duplicate tool output pruned]")
-  ).length
-  assert(prunedCount >= 1, `dedup prunes duplicates from 3-way repeat (got ${prunedCount} pruned)`)
-}
-
-// === Error Prune Hook ===
-section("Error Prune Hook")
-const { createErrorPruneHook } = await import("../src/hooks/error-prune")
-const errorHook = createErrorPruneHook(4)
-
-// Helper: minimal error tool part
-function errorTool(callID: string, tool: string, input: any, error: string): any {
-  return { type: "tool" as const, callID, tool, state: { status: "error" as const, input, error, time: { start: 0, end: 1 } } }
-}
-// Helper: minimal completed tool part (non-error)
-function okTool(callID: string, tool: string, input: any, output: string): any {
-  return { type: "tool" as const, callID, tool, state: { status: "completed" as const, input, output, title: tool, metadata: {}, time: { start: 0, end: 1 } } }
-}
-
-// Test: prunes errored tool inputs after threshold
-{
-  const errorHook = createErrorPruneHook(2) // prune after 2 turns
-  const input = {
-    messages: [
-      wpUser("hello"),                                                          // idx 0
-      wpAsst("trying", [errorTool("c1", "bash", { command: "bad" }, "Error: command failed")]),  // idx 1 — 3 turns ago → prune
-      wpUser("step 2"),                                                         // idx 2
-      wpAsst("retry", [errorTool("c2", "bash", { command: "bad2" }, "Error: failed again")]),    // idx 3 — 2 turns ago → prune
-      wpUser("step 3"),                                                         // idx 4
-      wpAsst("one more", [errorTool("c3", "bash", { command: "bad3" }, "Error: still failing")]), // idx 5 — 1 turn ago → no prune
-      wpUser("current"),                                                        // idx 6
-      wpAsst("done", [okTool("c4", "bash", { command: "good" }, "success")]),   // idx 7
-    ],
-  }
-  const output = { messages: structuredClone(input.messages) }
-  await errorHook(input, output)
-
-  // idx 1: should be pruned (input cleared, error message augmented)
-  const msg1 = output.messages[1]
-  const part1 = msg1.parts.find((p: any) => p.type === "tool")
-  assert(part1 !== undefined && typeof part1.state.input === "object" && Object.keys(part1.state.input).length === 0, "error-prune clears input on old errors")
-  assert(part1.state.error.includes("[Input content pruned after"), "error-prune adds note to error message")
-
-  // idx 3: should also be pruned
-  const msg3 = output.messages[3]
-  const part3 = msg3.parts.find((p: any) => p.type === "tool")
-  assert(part3 !== undefined && Object.keys(part3.state.input).length === 0, "error-prune clears input on 2nd old error")
-  assert(part3.state.error.includes("[Input content pruned after"), "error-prune adds note to 2nd error")
-
-  // idx 5: should NOT be pruned (only 1 turn ago < threshold 2)
-  const msg5 = output.messages[5]
-  const part5 = msg5.parts.find((p: any) => p.type === "tool")
-  assert(part5 !== undefined && Object.keys(part5.state.input).length > 0, "error-prune does NOT prune recent errors")
-}
-
-// Test: error-prune does NOT touch non-error messages (WithParts format)
-{
-  const errorHook = createErrorPruneHook(2)
-  const input = {
-    messages: [
-      wpUser("hello"),
-      wpAsst("working", [okTool("c1", "bash", { command: "good" }, "success")]),
-      wpUser("step 2"),
-      wpAsst("done", [okTool("c2", "bash", { command: "good2" }, "success2")]),
-    ],
-  }
-  const output = { messages: structuredClone(input.messages) }
-  await errorHook(input, output)
-  // Verify the completed tool parts still have their original input (not cleared)
-  const part1 = output.messages[1].parts.find((p: any) => p.type === "tool")
-  assert(part1 !== undefined && Object.keys(part1.state.input).length > 0, "error-prune does NOT touch completed tool inputs")
-  assertEq(part1.state.output, "success", "error-prune does NOT touch completed tool outputs")
 }
 
 // === Comment Checker Hook ===
@@ -230,35 +90,6 @@ const commentChecker = createCommentCheckerHook()
   const output: HookOutput = {}
   await commentChecker(input, output)
   assert(output.content === undefined, "comment-checker handles missing content gracefully")
-}
-
-// === Transform Pipeline Hook ===
-section("Transform Pipeline Hook")
-const { createTransformPipelineHook, DEFAULT_TRANSFORM_CONFIG } = await import("../src/hooks/transform-pipeline")
-const transformHook = createTransformPipelineHook("/home/ir192m2/Documents/LLMs/mimocode-powerpack", DEFAULT_TRANSFORM_CONFIG)
-
-// Test: transform pipeline runs on messages
-{
-  const input: HookInput & { messages: any[] } = {
-    messages: [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi there" },
-      { role: "user", content: "hello" },
-      { role: "assistant", content: "hi there again" },
-    ],
-  }
-  const output: HookOutput & { messages: any[] } = { messages: [...input.messages] }
-  await transformHook(input, output)
-  assert(Array.isArray(output.messages), "transform-pipeline preserves messages as array")
-  assertEq(output.messages.length, input.messages.length, "transform-pipeline preserves message count")
-}
-
-// Test: transform pipeline handles empty messages
-{
-  const input: HookInput & { messages: any[] } = { messages: [] }
-  const output: HookOutput & { messages: any[] } = { messages: [] }
-  await transformHook(input, output)
-  assertEq(output.messages.length, 0, "transform-pipeline handles empty messages array")
 }
 
 // === Notify Hook ===

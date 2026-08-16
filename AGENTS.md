@@ -178,9 +178,6 @@ Load with `skill("name")`. Match skill to stage.
 
 ## Hooks (Automatic — No Action Needed)
 
-- `dedup-prune` — duplicate tool calls pruned from context
-- `error-prune` — errored tool inputs pruned after a configurable number of turns
-- `transform-pipeline` — smart context drops, cache-layout optimization, session-fact extraction
 - `comment-checker` — flags AI-slop patterns in tool output
 - `safety-net` — blocks dangerous git/rm/find commands (cancels the tool call)
 - `todo-enforcer` — stops idle agents stuck on incomplete tasks
@@ -192,22 +189,19 @@ Load with `skill("name")`. Match skill to stage.
 
 ## Testing
 
-The plugin ships 10 test suites under `test/`. Run `bun run test/run-all.ts` for the full suite, or individual files for targeted testing.
+The plugin ships 7 test suites under `test/`. Run `bun run test/run-all.ts` for the full suite, or individual files for targeted testing.
 
 **When to write tests:**
 - After fixing a bug → add a regression test in the relevant suite
 - After adding a new module → create `test/test-<module>.ts` and add to `run-all.ts`
-- When touching memory/hooks/compression → verify existing tests still pass
+- When touching memory/hooks → verify existing tests still pass
 
 **Test structure:** Each suite uses a flat assert/assertEq pattern (no test framework). Sections group related tests. Exit code 0 = pass, 1 = fail.
 
 **Key test files:**
-- `test-hooks.ts` — hooks (dedup, error-prune, comment-checker, transform-pipeline, notify, todo-enforcer, safety-net, tool-discovery) + memory-utils, message-utils, server plugin wiring
+- `test-hooks.ts` — hooks (comment-checker, notify, todo-enforcer, safety-net, tool-discovery, quality-gate) + memory-utils, message-utils, server plugin wiring
 - `test-memory.ts` — MemoryStore, captureMemory, search (FTS/TF-IDF/hybrid/graph), decay math, batch ops, typed payloads, feedback-weighted search, legacy schema migration
 - `test-knowledge-graph.ts` — KnowledgeGraph node/edge CRUD, k-hop traversal, FTS search, subgraph extraction, stats
-- `test-compression.ts` — content-router, json-crusher, code-compressor, compress index
-- `test-cache-layout.ts` — m0/m1/m2 zone classification, bust severity, stability score
-- `test-smart-drops.ts` — context pruning strategies, applyDrops
 - `test-token-utils.ts` — token estimation for text and messages
 - `test-decay-render.ts` — compartment rendering, tier logic, M0 block extraction
 - `test-skills.ts` — YAML parser, skill installer, metadata

@@ -147,9 +147,6 @@ Working directly bloats your context. A subagent with a focused prompt uses 10-5
 
 ## Hooks (Automatic — No Action Needed)
 
-- `dedup-prune` — duplicate tool calls pruned from context
-- `error-prune` — errored tool inputs pruned after a configurable number of turns
-- `transform-pipeline` — smart context drops, cache-layout optimization, session-fact extraction
 - `comment-checker` — flags AI-slop patterns in tool output
 - `safety-net` — blocks dangerous git/rm/find commands (cancels the tool call)
 - `todo-enforcer` — stops idle agents stuck on incomplete tasks (off by default)

@@ -8,9 +8,6 @@
 /** Approximate characters per token (used for rough token estimation). */
 export const CHARS_PER_TOKEN_ESTIMATE = 4
 
-/** Maximum characters kept when pruning error content. */
-export const MAX_ERROR_CONTENT_LENGTH = 500
-
 /** Maximum directory levels walked when discovering nearby rule files. */
 export const MAX_RULE_WALK_DEPTH = 5
 
@@ -20,16 +17,7 @@ export const MAX_RULE_FILE_SIZE = 10240
 /** Maximum combined rules size (bytes) before truncation. */
 export const MAX_COMBINED_RULES_SIZE = 4096
 
-/** Minimum tool-output age (messages from end) before it becomes droppable. */
-export const MIN_TOOL_OUTPUT_AGE = 10
-
-/** Minimum age (messages from end) for stale ctx_reduce calls to be dropped. */
-export const STALE_REDUCE_MIN_AGE = 5
-
 /** Default cache TTL in milliseconds (5 minutes). */
-export const CACHE_EXPIRY_MS = 300_000
-
-/** Timeout for git status commands in milliseconds. */
 export const GIT_STATUS_TIMEOUT_MS = 5000
 
 /** Default embedding model for vector search. */

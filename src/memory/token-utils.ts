@@ -1,7 +1,7 @@
 /**
  * Token Estimation Utilities
  *
- * Shared helpers for rough token counting used by smart-drops and
+ * Shared helpers for rough token counting used by
  * context-analysis. Consolidates the duplicated estimateMessageTokens /
  * estimateTokens logic into a single source of truth.
  */

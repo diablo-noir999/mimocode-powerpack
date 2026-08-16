@@ -2,8 +2,9 @@
  * mimocode-powerpack — Server Plugin Entry
  *
  * A comprehensive plugin bundle for MiMoCode providing:
- * - Context management (analysis, dedup, error pruning)
- * - Agent behavior hooks (todo enforcer, comment checker)
+ * - Persistent memory (search/write, auto-capture, embeddings opt-in)
+ * - Context analysis (context_breakdown tool)
+ * - Agent behavior hooks (todo enforcer, comment checker, safety net)
  * - Notifications (native OS)
  * - 7 specialized subagents
  */
@@ -20,9 +21,6 @@ import { createActorGuideTool } from "./tools/actor-guide"
 import { captureFromSession } from "./memory/hooks"
 
 // Hook imports
-import { createDedupPruneHook } from "./hooks/dedup-prune"
-import { createErrorPruneHook } from "./hooks/error-prune"
-import { createTransformPipelineHook, type TransformPipelineConfig, DEFAULT_TRANSFORM_CONFIG } from "./hooks/transform-pipeline"
 import { createTodoEnforcerHook } from "./hooks/todo-enforcer"
 import { createCommentCheckerHook } from "./hooks/comment-checker"
 import { createNotifyHook } from "./hooks/notify"
@@ -46,13 +44,6 @@ export interface PowerpackOptions {
   commentChecker?: {
     enabled?: boolean
   }
-  dedupPrune?: {
-    enabled?: boolean
-  }
-  errorPrune?: {
-    enabled?: boolean
-    turnsBeforePrune?: number
-  }
   qualityGate?: {
     enabled?: boolean
   }
@@ -68,7 +59,6 @@ export interface PowerpackOptions {
       model?: string
     }
   }
-  transform?: Partial<TransformPipelineConfig>
 }
 
 const PowerpackPlugin: Plugin = async (ctx, options) => {
@@ -76,13 +66,10 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
     notify: { enabled: true, quietHours: { start: "22:00", end: "08:00" } },
     todoEnforcer: { enabled: false, maxFailures: 5, cooldownMs: 30000 },
     commentChecker: { enabled: true },
-    dedupPrune: { enabled: true },
-    errorPrune: { enabled: true, turnsBeforePrune: 4 },
     qualityGate: { enabled: false },
     safetyNet: { enabled: true },
     toolDiscovery: { enabled: true },
     memory: { enabled: true, autoCapture: true, embeddings: { enabled: false, model: "onnx-community/granite-embedding-small-english-r2-ONNX" } },
-    transform: { ...DEFAULT_TRANSFORM_CONFIG } as TransformPipelineConfig,
     ...((options as { powerpack?: PowerpackOptions })?.powerpack ?? {}),
   }
 
@@ -98,9 +85,6 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   }
 
   // Cache hook instances at init (avoids re-creating on every message)
-  const cachedDedupHook = config.dedupPrune.enabled ? createDedupPruneHook() : null
-  const cachedErrorHook = config.errorPrune.enabled ? createErrorPruneHook(config.errorPrune.turnsBeforePrune) : null
-  const cachedTransformHook = config.transform.enabled ? createTransformPipelineHook('', config.transform as TransformPipelineConfig) : null
   const cachedCommentHook = config.commentChecker.enabled ? createCommentCheckerHook() : null
   const cachedTodoEnforcerHook = config.todoEnforcer.enabled ? createTodoEnforcerHook(config.todoEnforcer as { enabled: boolean; maxFailures: number; cooldownMs: number }) : null
   const cachedQualityGateHook = config.qualityGate.enabled ? createQualityGateHook() : null
@@ -111,14 +95,11 @@ const PowerpackPlugin: Plugin = async (ctx, options) => {
   // Build hooks object
   const hooks: Record<string, any> = {}
 
-  // Context management: deduplicate repeated tool calls + transform pipeline
-  if (config.dedupPrune.enabled || config.errorPrune.enabled || config.transform.enabled) {
+  // Tool discovery: registered but a no-op on MiMoCode v0.1.7+ (message-format mismatch)
+  if (config.toolDiscovery.enabled) {
     hooks["experimental.chat.messages.transform"] = async (input: any, output: any) => {
       try {
         if (cachedToolDiscoveryHook) await cachedToolDiscoveryHook(input, output)
-        if (cachedDedupHook) await cachedDedupHook(input, output)
-        if (cachedErrorHook) await cachedErrorHook(input, output)
-        if (cachedTransformHook) await cachedTransformHook(input, output)
       } catch (err) {
         // A throw here fails the whole LLM step in MiMoCode's run loop
         // (no timeout, no catch around the transform hook). Never escape.

@@ -1,6 +1,6 @@
 # mimocode-powerpack
 
-A plugin bundle for [MiMoCode](https://mimo.xiaomi.com/mimocode/start) — persistent memory with semantic search, context management, agent-behavior hooks, notifications, compression, skills, and 7 specialized subagents.
+A plugin bundle for [MiMoCode](https://mimo.xiaomi.com/mimocode/start) — persistent memory with semantic search, agent-behavior hooks, notifications, skills, and 7 specialized subagents.
 
 ## What's Included
 
@@ -27,7 +27,7 @@ The plugin ships a comprehensive AGENTS.md with:
 - **Knowledge Graph** — lightweight SQLite graph (kg_nodes + kg_edges) with k-hop traversal, FTS search, subgraph extraction
 - **Feedback-Weighted Retrieval** — search results boosted/reduced by feedback scores (configurable influence factor)
 - **Auto-Capture** — extracts structured facts (TOOL_CALL, FILE_CHANGE, DECISION, ERROR_PATTERN, CONFIG_CHANGE) from completed sessions
-- **Session Facts + Cache** — per-session fact extraction and an in-memory LRU cache
+- **Session Cache** — in-memory LRU cache of session-scoped data (substring search)
 - **Code Index** — tree-sitter AST chunking + embeddings for codebase semantic search
 - **Brain Map** — Obsidian-style knowledge vault at `.mimocode/context/` (raw/wiki/output) via `skill("brain-map")`
 - **Schema Migration** — legacy DBs are migrated in place (missing columns added via `ALTER TABLE`)
@@ -39,9 +39,6 @@ Uses `onnx-community/granite-embedding-small-english-r2-ONNX` (47M params, 384 d
 ### Context Management
 
 - **Context Analysis** — `context_breakdown` tool with per-category and per-tool token usage charts
-- **Tool Deduplication** — prunes duplicate tool calls from context (WithParts format)
-- **Error Purging** — prunes errored tool inputs after a configurable number of turns
-- **Transform Pipeline** — smart context drops, cache-layout optimization (m0/m1/m2 zones), session-fact extraction
 
 ### Hooks & Agent Behavior
 
@@ -51,10 +48,6 @@ Uses `onnx-community/granite-embedding-small-english-r2-ONNX` (47M params, 384 d
 - **Notify** — native OS notifications with configurable quiet hours
 - **Quality Gate** — session-level checks (off by default)
 - **Tool Discovery** — registered but a no-op on MiMoCode v0.1.7+ (message-format mismatch)
-
-### Compression
-
-Content-type routed compression: regex-detected JSON array compression (SmartCrusher pattern) and AST-aware code compression with min-savings thresholds.
 
 ### Subagents (7)
 
@@ -98,8 +91,6 @@ If you prefer to configure manually, add this to the `plugin` array of `~/.confi
     "notify": { "enabled": true, "quietHours": { "start": "22:00", "end": "08:00" } },
     "todoEnforcer": { "enabled": false, "maxFailures": 5, "cooldownMs": 30000 },
     "commentChecker": { "enabled": true },
-    "dedupPrune": { "enabled": true },
-    "errorPrune": { "enabled": true, "turnsBeforePrune": 4 },
     "qualityGate": { "enabled": false },
     "safetyNet": { "enabled": true },
     "toolDiscovery": { "enabled": true },
@@ -107,8 +98,7 @@ If you prefer to configure manually, add this to the `plugin` array of `~/.confi
       "enabled": true,
       "autoCapture": true,
       "embeddings": { "enabled": false, "model": "onnx-community/granite-embedding-small-english-r2-ONNX" }
-    },
-    "transform": { "enabled": true, "smartDrops": true, "cacheLayout": true, "sessionFacts": true }
+    }
   }
 }]
 ```
@@ -131,9 +121,6 @@ All options live in the `powerpack` section of the plugin entry:
 | `todoEnforcer.maxFailures` | `5` | Max idle cycles before stop |
 | `todoEnforcer.cooldownMs` | `30000` | Cooldown between idle checks |
 | `commentChecker.enabled` | `true` | AI slop detection on tool output |
-| `dedupPrune.enabled` | `true` | Tool call deduplication |
-| `errorPrune.enabled` | `true` | Error input pruning |
-| `errorPrune.turnsBeforePrune` | `4` | Turns before pruning errors |
 | `qualityGate.enabled` | `false` | Session-level checks |
 | `safetyNet.enabled` | `true` | Destructive-command blocking |
 | `toolDiscovery.enabled` | `true` | No-op on v0.1.7+ (message-format mismatch) |
@@ -141,10 +128,6 @@ All options live in the `powerpack` section of the plugin entry:
 | `memory.autoCapture` | `true` | Auto-extract session facts |
 | `memory.embeddings.enabled` | `false` | Opt-in: Granite ONNX embeddings (downloads model from HuggingFace on first init; keep off on restricted/slow networks) |
 | `memory.embeddings.model` | `granite-embedding-small-english-r2-ONNX` | Embedding model id |
-| `transform.enabled` | `true` | Context transform pipeline |
-| `transform.smartDrops` | `true` | Context pruning strategies |
-| `transform.cacheLayout` | `true` | m0/m1/m2 cache zones |
-| `transform.sessionFacts` | `true` | Session fact extraction |
 
 ## Development
 
@@ -152,16 +135,13 @@ All options live in the `powerpack` section of the plugin entry:
 bun install                      # install deps
 bun run typecheck                # tsc --noEmit
 bun run build                    # bundle to dist/
-bun run test/run-all.ts          # full test suite (10 suites)
+bun run test/run-all.ts          # full test suite (7 suites)
 
 # Individual suites
 bun run test/test-hooks.ts
 bun run test/test-memory.ts
 bun run test/test-knowledge-graph.ts
 bun run test/test-brain-gather.ts
-bun run test/test-compression.ts
-bun run test/test-cache-layout.ts
-bun run test/test-smart-drops.ts
 bun run test/test-token-utils.ts
 bun run test/test-decay-render.ts
 bun run test/test-skills.ts
@@ -169,12 +149,9 @@ bun run test/test-skills.ts
 
 | Suite | Covers |
 |-------|--------|
-| hooks | dedup-prune, error-prune, comment-checker, transform-pipeline, notify, todo-enforcer, safety-net, tool-discovery, memory-utils, message-utils, server plugin wiring |
+| hooks | comment-checker, notify, todo-enforcer, safety-net, tool-discovery, memory-utils, message-utils, server plugin wiring |
 | memory | MemoryStore CRUD, dedup, decay, capture, FTS/TF-IDF/hybrid/graph search, typed payloads, feedback weighting, legacy schema migration |
 | knowledge-graph | Node/edge CRUD, k-hop traversal, FTS search, subgraph extraction, stats |
-| compression | Content router, JSON crusher, code compressor |
-| cache-layout | m0/m1/m2 zones, bust severity, stability |
-| smart-drops | Pruning strategies, applyDrops |
 | token-utils | Token estimation for text and messages |
 | decay-render | Compartment rendering, tier logic |
 | skills | YAML parser, skill installer, metadata |
@@ -188,15 +165,14 @@ src/
 ├── tui.ts               # TUI entry (api.command handlers)
 ├── agents/              # 7 subagent definitions (.md)
 ├── memory/              # store, search, embeddings, knowledge-graph, decay,
-│                        # session-facts, cache-layout, smart-drops, code-index, ...
-├── hooks/               # 9 hooks (dedup, error-prune, transform, safety-net, ...)
+│                        # code-index, session-cache, ...
+├── hooks/               # 6 hooks (safety-net, comment-checker, notify, ...)
 ├── tools/               # context-analysis, memory-search, memory-write, actor-guide
-├── skills/              # installer, syncer, yaml, metadata, usage tracking
-└── compression/         # content-router, json-crusher, code-compressor
+└── skills/              # installer, syncer, yaml, metadata, usage tracking
 modes/ultracode.md       # Ultracode primary mode
 skills/                  # 18 user-facing skills
 scripts/                 # install.sh, uninstall.sh, jsonc-edit.mjs
-test/                    # 10 test suites
+test/                    # 7 test suites
 ```
 
 ## License

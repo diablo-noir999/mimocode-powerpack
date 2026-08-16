@@ -1,8 +1,7 @@
 /**
  * Shared message utilities for memory module.
  *
- * Helper functions used by both session-facts and smart-drops
- * for extracting tool information from message objects.
+ * Helper functions for extracting tool information from message objects.
  */
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
