@@ -105,7 +105,7 @@ if [ "$MODE" = "global" ]; then
   fi
 
   # Plugin options mirror PowerpackOptions defaults (src/server.ts)
-  OPTIONS='{"notify":{"enabled":true,"quietHours":{"start":"22:00","end":"08:00"}},"todoEnforcer":{"enabled":false,"maxFailures":5,"cooldownMs":30000},"commentChecker":{"enabled":true},"dedupPrune":{"enabled":true},"errorPrune":{"enabled":true,"turnsBeforePrune":4},"qualityGate":{"enabled":false},"safetyNet":{"enabled":true},"toolDiscovery":{"enabled":true},"memory":{"enabled":true,"autoCapture":true,"embeddings":{"enabled":true,"model":"onnx-community/granite-embedding-small-english-r2-ONNX"}},"transform":{"enabled":true,"smartDrops":true,"cacheLayout":true,"sessionFacts":true}}'
+  OPTIONS='{"notify":{"enabled":true,"quietHours":{"start":"22:00","end":"08:00"}},"todoEnforcer":{"enabled":false,"maxFailures":5,"cooldownMs":30000},"commentChecker":{"enabled":true},"safetyNet":{"enabled":true},"toolDiscovery":{"enabled":true},"memory":{"enabled":true,"autoCapture":true,"embeddings":{"enabled":false,"model":"onnx-community/granite-embedding-small-english-r2-ONNX"}}}'
 
   JSONC_EDIT=""
   if command -v bun >/dev/null 2>&1; then
